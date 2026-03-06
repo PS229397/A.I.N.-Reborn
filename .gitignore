@@ -6,6 +6,11 @@ __pycache__/
 venv/
 env/
 
+# Package build artifacts
+dist/
+build/
+*.egg-info/
+
 
 # OS
 .DS_Store

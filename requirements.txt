@@ -1,4 +1,5 @@
-# AI Development Pipeline — Python dependencies
-# All are optional. The pipeline runs on stdlib alone.
-# colorama adds colored output on Windows terminals.
+# Runtime dependency (bundled in pyproject.toml)
 colorama>=0.4.6
+
+# Build / publish tools (not required to run the pipeline)
+# pip install build twine

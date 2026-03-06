@@ -1,15 +1,25 @@
-# AI Development Pipeline
+# A.I.N. Pipeline
 
 A local multi-agent orchestrator for structured, reproducible AI-assisted development.
 
-Coordinates Gemini, Codex, and Claude through deterministic stages — producing planning artifacts before touching any code, and requiring human approval before implementation begins.
+Coordinates Gemini, Codex, ChiefLoop, and Claude through deterministic stages — producing planning artifacts before touching any code, and requiring human approval before implementation begins.
+
+---
+
+## Installation
+
+```bash
+pip install ain-pipeline
+```
+
+This installs the `ain` CLI globally. You can then initialize the pipeline in any repository.
 
 ---
 
 ## How it works
 
-```
-python pipeline.py
+```bash
+ain run
 ```
 
 The pipeline executes these stages in sequence:
@@ -36,49 +46,61 @@ Human involvement occurs at two points only:
 ## Requirements
 
 - Python 3.10+
-- Git (for branch creation and file tracking)
+- Git
 - AI agent CLIs configured in `.ai-pipeline/config.json`:
   - [`gemini`](https://github.com/google-gemini/gemini-cli) — architecture stage
   - [`codex`](https://github.com/openai/codex) — planning stage
-  - [`claude`](https://claude.ai/claude-code) — task creation + implementation
-
-Install Python dependencies (optional — only adds colored terminal output):
-
-```bash
-pip install -r requirements.txt
-```
+  - [`chiefloop`](https://github.com/PS229397/A.I.N.-Reborn) or `claude --print` — task creation stage
+  - [`claude`](https://claude.ai/claude-code) — implementation stage
 
 ---
 
 ## Quickstart
 
 ```bash
-# 1. Run the full pipeline from the beginning
-python pipeline.py
+# 1. Install
+pip install ain-pipeline
 
-# 2. After the planning questions stage pauses, answer the questions:
+# 2. Initialize the pipeline in your repo
+cd your-project
+ain init
+
+# 3. Configure your agents
+#    Edit .ai-pipeline/config.json
+
+# 4. Run
+ain run
+
+# 5. The pipeline pauses after planning questions — answer them:
 #    Edit docs/OPEN_ANSWERS.md, then continue:
-python pipeline.py
+ain run
 
-# 3. Review the planning artifacts, then approve:
-python pipeline.py --approve
+# 6. Review the plan, then approve:
+ain --approve
 
-# 4. Pipeline continues through implementation and validation automatically
+# 7. Pipeline runs implementation and validation automatically
 ```
 
 ---
 
 ## CLI Reference
 
+### Subcommands
+
 | Command | Description |
 |---|---|
-| `python pipeline.py` | Run pipeline from current stage |
-| `python pipeline.py --status` | Show current stage and task progress |
-| `python pipeline.py --approve` | Approve planning artifacts, advance to implementation |
-| `python pipeline.py --resume <stage>` | Resume from a specific stage |
-| `python pipeline.py --stage <stage>` | Run one stage only |
-| `python pipeline.py --reset` | Reset pipeline to idle (clears all state) |
-| `python pipeline.py --init-config` | Write default `.ai-pipeline/config.json` |
+| `ain init` | Scaffold `.ai-pipeline/` into the current repo |
+| `ain run` | Run pipeline from current stage |
+| `ain run --resume <stage>` | Resume from a specific stage |
+| `ain run --stage <stage>` | Run one stage only |
+
+### Flags
+
+| Flag | Description |
+|---|---|
+| `ain --status` | Show current stage and task progress |
+| `ain --approve` | Approve planning artifacts, advance to implementation |
+| `ain --reset` | Reset pipeline to idle (clears all state) |
 
 ### Stages
 
@@ -95,18 +117,18 @@ validation
 done
 ```
 
-Resume example:
+Examples:
 
 ```bash
-python pipeline.py --resume architecture
-python pipeline.py --resume implementation
+ain run --resume architecture
+ain run --stage task_creation
 ```
 
 ---
 
 ## Configuration
 
-Edit `.ai-pipeline/config.json` to configure agent commands, git behavior, and validation.
+`ain init` writes `.ai-pipeline/config.json` to your repo. Edit it to configure agent commands, git behaviour, and validation.
 
 ### Agent commands
 
@@ -124,8 +146,8 @@ Edit `.ai-pipeline/config.json` to configure agent commands, git behavior, and v
       "model": null
     },
     "task_creation": {
-      "command": "claude",
-      "args": ["--print"],
+      "command": "chiefloop",
+      "args": [],
       "model": null
     },
     "implementation": {
@@ -137,13 +159,13 @@ Edit `.ai-pipeline/config.json` to configure agent commands, git behavior, and v
 }
 ```
 
-Set `"model"` to a specific model string if you want to override the agent's default.
+Set `"model"` to override an agent's default model. Each agent is invoked with the prompt piped via stdin and reads output from stdout.
 
 ### ChiefLoop (task creation agent)
 
-ChiefLoop is the task orchestration engine for the `task_creation` stage. It converts the planning documents (`PRD.md`, `DESIGN.md`, `FEATURE_SPEC.md`) into an ordered, dependency-aware task graph (`TASKS.md` + `TASK_GRAPH.json`).
+ChiefLoop is the task orchestration engine responsible for converting planning documents into a structured, dependency-ordered task graph (`TASKS.md` + `TASK_GRAPH.json`).
 
-The pipeline defaults `task_creation` to `claude --print` so it works out of the box without ChiefLoop installed. If you have ChiefLoop available, point the stage at it in config:
+The pipeline defaults `task_creation` to `claude --print` so it works out of the box without ChiefLoop installed. To use ChiefLoop when available:
 
 ```json
 {
@@ -157,13 +179,10 @@ The pipeline defaults `task_creation` to `claude --print` so it works out of the
 }
 ```
 
-The pipeline pipes the prompt to the command via stdin and reads the output. ChiefLoop (or any substitute) must:
-
+Any agent used in this slot must:
 1. Accept a prompt on stdin
 2. Return output containing `<!-- FILE: TASKS.md -->` and `<!-- FILE: TASK_GRAPH.json -->` markers
 3. Exit 0 on success
-
-Any agent that produces those two artifacts in the expected format will work.
 
 ### Git settings
 
@@ -177,12 +196,12 @@ Any agent that produces those two artifacts in the expected format will work.
 }
 ```
 
-`auto_branch` creates a `ai/feature-<timestamp>` branch before implementation begins.
-`auto_commit` is disabled by default — enable to auto-commit after validation passes.
+`auto_branch` creates an `ai/feature-<timestamp>` branch before implementation begins.
+`auto_commit` is disabled by default — enable to commit automatically after validation passes.
 
 ### Custom validation commands
 
-By default the pipeline auto-detects validation commands from your project type (Laravel, Node, Python, Go, Rust). Override with explicit commands:
+The pipeline auto-detects validation commands from your project type (Laravel, Node, Python, Go, Rust). Override with explicit commands:
 
 ```json
 {
@@ -201,10 +220,10 @@ By default the pipeline auto-detects validation commands from your project type 
 
 ## File structure
 
+After `ain init`, your repo will contain:
+
 ```
-repo/
-├── pipeline.py                        Orchestrator
-├── requirements.txt
+your-repo/
 ├── docs/
 │   ├── architecture.md                Generated by Gemini
 │   ├── OPEN_QUESTIONS.md              Generated by Codex
@@ -229,12 +248,14 @@ repo/
     │   ├── task_creation_prompt.md
     │   └── implementation_prompt.md
     ├── approvals/
-    │   └── planning_approved.flag     Created by --approve
+    │   └── planning_approved.flag     Created by ain --approve
     └── logs/
         ├── pipeline.log
         ├── validation.log
         └── <agent>_last_prompt.txt    Debug: last prompt sent to each agent
 ```
+
+The prompt files are yours to edit — they control exactly what each agent is asked to do.
 
 ---
 
@@ -247,16 +268,29 @@ Gemini never talks to Codex. Codex never talks to Claude. Each agent reads docum
 The approval gate prevents Claude from implementing a plan that hasn't been reviewed. The flag file at `.ai-pipeline/approvals/planning_approved.flag` controls this.
 
 **Every decision is traceable.**
-The scan artifacts, all planning documents, the task graph, the implementation log, and the validation log are all written to disk and can be reviewed or committed to version control.
+The scan artifacts, planning documents, task graph, implementation log, and validation log are all written to disk and can be committed to version control.
 
 **The pipeline is resumable.**
-Any stage can be re-run with `--resume`. If an agent produces bad output, fix the artifact manually and resume from the next stage.
+Any stage can be re-run with `ain run --resume <stage>`. If an agent produces bad output, fix the artifact manually and resume from the next stage.
+
+---
+
+## Drop-in usage (no install)
+
+If you don't want a global install, clone this repo and copy `pipeline.py` into your project. It works identically to the `ain` CLI as long as the `ain/` package directory is alongside it:
+
+```bash
+# Clone or download pipeline.py + ain/ into your project
+python pipeline.py init
+python pipeline.py run
+python pipeline.py --status
+```
 
 ---
 
 ## Warp Terminal
 
-Workflow shortcuts are included in `.warp/workflows/`. To make them available globally, copy them to your Warp workflows directory:
+Workflow shortcuts are included in `.warp/workflows/`. Copy them to make them available globally in Warp:
 
 ```bash
 cp .warp/workflows/*.yaml ~/.warp/workflows/
@@ -266,32 +300,48 @@ Available shortcuts: `Pipeline — Run`, `Pipeline — Scan`, `Pipeline — Plan
 
 ---
 
+## Publishing (maintainer notes)
+
+```bash
+pip install build twine
+python -m build
+twine upload dist/*
+```
+
+Future releases:
+```bash
+# bump version in pyproject.toml, then:
+python -m build && twine upload dist/*
+```
+
+---
+
 ## Troubleshooting
 
 **Pipeline is stuck in `failed` state**
 ```bash
-python pipeline.py --status           # see the failure reason
-python pipeline.py --resume <stage>   # resume after fixing the issue
-python pipeline.py --reset            # or reset entirely
+ain --status                       # see the failure reason
+ain run --resume <stage>           # resume after fixing the issue
+ain --reset                        # or reset entirely
 ```
 
 **Agent command not found**
 Edit `.ai-pipeline/config.json` and set the correct `command` for the failing agent. Verify the CLI is on your PATH.
 
 **Architecture validation failed**
-The architecture document is missing required headings. Open `docs/architecture.md`, add the missing sections, then re-run:
+The architecture document is missing required headings. Open `docs/architecture.md`, add the missing sections, then:
 ```bash
-python pipeline.py --resume planning_questions
+ain run --resume planning_questions
 ```
 
 **Planning documents are malformed**
-The planning agent didn't use the required `<!-- FILE: name.md -->` markers. Check `.ai-pipeline/logs/planning_last_output.txt` for the raw output, fix `docs/PRD.md` and `docs/DESIGN.md` manually, then:
+The planning agent didn't use the required `<!-- FILE: name.md -->` markers. Check `.ai-pipeline/logs/planning_last_output.txt` for the raw output, fix the docs manually, then:
 ```bash
-python pipeline.py --resume task_creation
+ain run --resume task_creation
 ```
 
 **Validation fails after implementation**
 Check `.ai-pipeline/logs/validation.log`. Fix the issues in the codebase, then:
 ```bash
-python pipeline.py --resume validation
+ain run --resume validation
 ```
