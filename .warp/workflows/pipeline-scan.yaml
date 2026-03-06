@@ -1,6 +1,6 @@
 ---
 name: Pipeline — Scan
-command: python pipeline.py --stage scanning
+command: ain run --stage scanning
 description: Run only the repository scan stage
 tags:
   - ai-pipeline

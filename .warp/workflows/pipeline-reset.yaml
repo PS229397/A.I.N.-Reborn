@@ -1,6 +1,6 @@
 ---
 name: Pipeline — Reset
-command: python pipeline.py --reset
+command: ain --reset
 description: Reset the pipeline to idle state (clears approval flag)
 tags:
   - ai-pipeline

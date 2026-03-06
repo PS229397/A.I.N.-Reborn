@@ -1,6 +1,6 @@
 ---
 name: Pipeline — Status
-command: python pipeline.py --status
+command: ain --status
 description: Show current pipeline stage and task progress
 tags:
   - ai-pipeline

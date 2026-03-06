@@ -20,6 +20,7 @@ Thumbs.db
 .idea/
 *.iml
 .vscode/
+.claude/
 
 # Node
 node_modules/

@@ -1,6 +1,6 @@
 ---
 name: Pipeline — Implement
-command: python pipeline.py --resume implementation
+command: ain run --resume implementation
 description: Resume pipeline from implementation stage (requires prior approval)
 tags:
   - ai-pipeline
