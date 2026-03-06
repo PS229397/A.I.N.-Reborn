@@ -6,14 +6,6 @@ __pycache__/
 venv/
 env/
 
-# Pipeline runtime (logs and debug output are local-only)
-.ai-pipeline/logs/
-.ai-pipeline/approvals/
-
-# Keep prompts, state, and config tracked
-!.ai-pipeline/prompts/
-!.ai-pipeline/state.json
-!.ai-pipeline/config.json
 
 # OS
 .DS_Store
