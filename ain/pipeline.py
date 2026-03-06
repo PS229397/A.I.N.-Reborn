@@ -41,13 +41,14 @@ from typing import Any
 # ─────────────────────────────────────────────────────────────
 
 REPO_ROOT     = Path.cwd()
-PIPELINE_DIR  = REPO_ROOT / ".ai-pipeline"
-STATE_FILE    = PIPELINE_DIR / "state.json"
-CONFIG_FILE   = PIPELINE_DIR / "config.json"
-SCAN_DIR      = PIPELINE_DIR / "scan"
-PROMPTS_DIR   = PIPELINE_DIR / "prompts"
-LOGS_DIR      = PIPELINE_DIR / "logs"
-APPROVALS_DIR = PIPELINE_DIR / "approvals"
+PIPELINE_DIR      = REPO_ROOT / ".ai-pipeline"
+STATE_FILE        = PIPELINE_DIR / "state.json"
+CONFIG_FILE       = PIPELINE_DIR / "config.json"
+SCAN_DIR          = PIPELINE_DIR / "scan"
+PROMPTS_DIR       = PIPELINE_DIR / "prompts"
+LOGS_DIR          = PIPELINE_DIR / "logs"
+APPROVALS_DIR     = PIPELINE_DIR / "approvals"
+USER_CONTEXT_FILE = PIPELINE_DIR / "user_context.md"
 DOCS_DIR      = REPO_ROOT / "docs"
 PIPELINE_LOG  = LOGS_DIR / "pipeline.log"
 
@@ -75,6 +76,7 @@ STAGES = [
     "idle",
     "scanning",
     "architecture",
+    "user_context",
     "planning_questions",
     "planning_generation",
     "task_creation",
@@ -90,8 +92,9 @@ STAGE_LABELS = {
     "idle":                "Idle",
     "scanning":            "Repository Scan",
     "architecture":        "Architecture Generation",
-    "planning_questions":  "Planning Questions",
-    "planning_generation": "Planning Generation",
+    "user_context":        "Feature Context",
+    "planning_questions":  "Planning — Brainstorm",
+    "planning_generation": "Planning — Generation",
     "task_creation":       "Task Creation",
     "waiting_approval":    "Waiting for Approval",
     "implementation":      "Implementation",
@@ -133,6 +136,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "planning": {
             "command": "codex", "args": [], "model": None,
+            "prompt_mode": "arg",
             "description": "Codex for planning and specification",
         },
         "task_creation": {
@@ -320,10 +324,13 @@ def run_command(
         kwargs["stdout"] = subprocess.PIPE
         kwargs["stderr"] = subprocess.PIPE
         kwargs["text"] = True
+        kwargs["encoding"] = "utf-8"
+        kwargs["errors"] = "replace"
     if input_text is not None:
         kwargs["input"] = input_text
-        kwargs["stdin"] = subprocess.PIPE
         kwargs["text"] = True
+        kwargs["encoding"] = "utf-8"
+        kwargs["errors"] = "replace"
     if isinstance(cmd, str):
         kwargs["shell"] = True
     result = subprocess.run(cmd, **kwargs)
@@ -345,10 +352,11 @@ def run_command_output(cmd: list[str] | str, cwd: Path | None = None) -> str:
 # ─────────────────────────────────────────────────────────────
 
 def call_agent(agent_name: str, prompt: str, config: dict) -> str:
-    agent_cfg = config["agents"].get(agent_name, {})
-    command   = agent_cfg.get("command", agent_name)
-    extra_args= agent_cfg.get("args", [])
-    model     = agent_cfg.get("model")
+    agent_cfg   = config["agents"].get(agent_name, {})
+    command     = agent_cfg.get("command", agent_name)
+    extra_args  = agent_cfg.get("args", [])
+    model       = agent_cfg.get("model")
+    prompt_mode = agent_cfg.get("prompt_mode", "stdin")  # "stdin" | "arg"
 
     # Resolve full path so subprocess finds .cmd wrappers on Windows
     resolved = shutil.which(command)
@@ -360,13 +368,18 @@ def call_agent(agent_name: str, prompt: str, config: dict) -> str:
         cmd += ["--model", model]
 
     info(f"Invoking {agent_cfg.get('command', agent_name)} ({agent_name}) ...")
-    _log(f"AGENT CALL: {agent_name} via {command}")
+    _log(f"AGENT CALL: {agent_name} via {command} (prompt_mode={prompt_mode})")
 
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     (LOGS_DIR / f"{agent_name}_last_prompt.txt").write_text(prompt, encoding="utf-8")
 
     try:
-        result = run_command(cmd, capture=True, input_text=prompt, timeout=600)
+        if prompt_mode == "arg":
+            # Pass prompt as a positional argument (e.g. codex "prompt text")
+            result = run_command(cmd + [prompt], capture=True, timeout=600)
+        else:
+            # Default: pipe prompt via stdin
+            result = run_command(cmd, capture=True, input_text=prompt, timeout=600)
         output = result.stdout or ""
         if result.returncode != 0:
             warn(f"Agent {agent_name} exited {result.returncode}")
@@ -423,8 +436,13 @@ def validate_task_graph(graph_file: Path) -> bool:
     if not graph_file.exists():
         return False
     try:
-        data = json.loads(graph_file.read_text(encoding="utf-8"))
-        return isinstance(data.get("tasks"), list) and len(data["tasks"]) > 0
+        content = _strip_fences(graph_file.read_text(encoding="utf-8"))
+        data = json.loads(content)
+        # If valid JSON with tasks, also rewrite without fences
+        if isinstance(data.get("tasks"), list) and len(data["tasks"]) > 0:
+            graph_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            return True
+        return False
     except (json.JSONDecodeError, KeyError):
         return False
 
@@ -626,85 +644,214 @@ def run_architecture(state: dict, config: dict) -> None:
         raise RuntimeError("Architecture validation failed. Fix docs/architecture.md then re-run.")
 
     success("Architecture validation passed.")
-    set_stage("planning_questions", state)
+    set_stage("user_context", state)
 
 # ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# Popup helpers
+# ─────────────────────────────────────────────────────────────
+
+USER_CONTEXT_TEMPLATE = """\
+# Feature / Bug Context
+
+Describe the feature you want to implement or the bug you want to fix.
+Be as specific as possible — this will guide the entire planning phase.
+
+## What do you want to build or fix?
+
+(Replace this text with your description)
+
+## Additional context (optional)
+
+- Relevant files or areas of the codebase:
+- Related issues or tickets:
+- Constraints or requirements:
+- Tech preferences:
+"""
+
+
+def _open_in_editor(path: Path) -> None:
+    """Open a file in the system default text editor."""
+    if platform.system() == "Windows":
+        subprocess.Popen(["notepad", str(path)])
+    elif platform.system() == "Darwin":
+        subprocess.Popen(["open", "-t", str(path)])
+    else:
+        editor = os.environ.get("EDITOR", "nano")
+        subprocess.run([editor, str(path)])
+
+
+def _open_popup_terminal(title: str, command: str) -> None:
+    """Open a new terminal window running the given shell command."""
+    if platform.system() == "Windows":
+        subprocess.Popen(f'start "{title}" cmd /k {command}', shell=True)
+    elif platform.system() == "Darwin":
+        script = f'tell application "Terminal" to do script "{command}"'
+        subprocess.Popen(["osascript", "-e", script])
+    else:
+        for term in ["gnome-terminal --", "xterm -e", "konsole -e"]:
+            exe = term.split()[0]
+            if shutil.which(exe):
+                subprocess.Popen(f'{term} bash -c "{command}; bash"', shell=True)
+                break
+
+
+def _wait_for_user(prompt: str) -> None:
+    print()
+    try:
+        input(f"  {prompt} → ")
+    except (EOFError, KeyboardInterrupt):
+        warn("Interrupted.")
+        sys.exit(0)
+
+
+# ─────────────────────────────────────────────────────────────
+# Stage: Feature Context
+# ─────────────────────────────────────────────────────────────
+
+def run_user_context(state: dict, config: dict) -> None:
+    banner("Stage: Feature Context")
+
+    if not USER_CONTEXT_FILE.exists():
+        USER_CONTEXT_FILE.write_text(USER_CONTEXT_TEMPLATE, encoding="utf-8")
+
+    info(f"Opening context file: {USER_CONTEXT_FILE.relative_to(REPO_ROOT)}")
+    _open_in_editor(USER_CONTEXT_FILE)
+
+    print()
+    print(f"{C.BOLD}{C.YELLOW}  ACTION REQUIRED{C.RESET}")
+    print(f"  Describe the feature or bug in the editor window that just opened.")
+    print(f"  File: {C.CYAN}{USER_CONTEXT_FILE.relative_to(REPO_ROOT)}{C.RESET}")
+    print(f"  Save and close the file when done.")
+    print()
+    _wait_for_user("Press Enter once you have saved your feature description")
+
+    content = USER_CONTEXT_FILE.read_text(encoding="utf-8")
+    if "(Replace this text with your description)" in content:
+        warn("Context file appears unchanged. Fill in your description and re-run.")
+        sys.exit(0)
+
+    success("Feature context saved.")
+    set_stage("planning_questions", state)
+
+
 # Stage 3: Planning Questions (Codex)
 # ─────────────────────────────────────────────────────────────
 
 def run_planning_questions(state: dict, config: dict) -> None:
-    banner("Stage: Planning Questions (Codex)")
+    banner("Stage: Planning — Brainstorm (Codex)")
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
-    prompt_file = PROMPTS_DIR / "planning_questions_prompt.md"
-    if not prompt_file.exists():
-        raise RuntimeError(f"Missing prompt: {prompt_file}")
+    user_ctx = USER_CONTEXT_FILE.read_text(encoding="utf-8") if USER_CONTEXT_FILE.exists() else ""
+    arch_ctx = ARCHITECTURE_FILE.read_text(encoding="utf-8") if ARCHITECTURE_FILE.exists() else ""
 
-    step(1, 2, "Building prompt ...")
-    prompt = build_prompt(prompt_file, ARCHITECTURE_FILE, REPO_SUMMARY_FILE)
+    brainstorm_context = PIPELINE_DIR / "brainstorm_context.md"
+    brainstorm_context.write_text(
+        f"# Brainstorm Context\n\n## Feature Request\n\n{user_ctx}\n\n"
+        f"## Architecture Overview\n\n{arch_ctx[:4000]}\n",
+        encoding="utf-8",
+    )
 
-    step(2, 2, "Calling planning agent for questions ...")
-    output = call_agent("planning", prompt, config)
+    codex_cmd = shutil.which("codex") or "codex"
+    ctx_path  = str(brainstorm_context).replace("\\", "/")
+    out_path  = str(OPEN_QUESTIONS_FILE).replace("\\", "/")
+    brainstorm_prompt = (
+        f"Read {ctx_path} to understand the feature request and the existing codebase. "
+        f"Ask me clarifying questions to remove all ambiguity. "
+        f"When we reach full clarity, write a clean Q&A summary to {out_path}."
+    )
 
-    if not output.strip():
-        warn("No questions returned. Proceeding to planning generation.")
+    info("Opening Codex brainstorm session in a new terminal window ...")
+    info(f"Context: {brainstorm_context.relative_to(REPO_ROOT)}")
+    _open_popup_terminal("A.I.N. Brainstorm", f'{codex_cmd} "{brainstorm_prompt}"')
+
+    print()
+    print(f"{C.BOLD}{C.YELLOW}  BRAINSTORM IN PROGRESS{C.RESET}")
+    print(f"  Codex is running in the popup window.")
+    print(f"  Have your back-and-forth conversation there.")
+    print(f"  When done, Codex should have written:")
+    print(f"    {C.CYAN}{OPEN_QUESTIONS_FILE.relative_to(REPO_ROOT)}{C.RESET}")
+    print(f"  If it did not, create that file manually with your Q&A summary.")
+    print()
+    _wait_for_user("Press Enter when your brainstorm session is complete")
+
+    if not OPEN_QUESTIONS_FILE.exists():
+        warn("OPEN_QUESTIONS.md not found. Creating placeholder.")
         OPEN_QUESTIONS_FILE.write_text("# Open Questions\n\nNo clarification needed.\n", encoding="utf-8")
     else:
-        OPEN_QUESTIONS_FILE.write_text(output, encoding="utf-8")
-        success(f"Questions → {OPEN_QUESTIONS_FILE.relative_to(REPO_ROOT)}")
+        success(f"Questions loaded: {OPEN_QUESTIONS_FILE.relative_to(REPO_ROOT)}")
 
     set_stage("planning_generation", state)
 
-    content = OPEN_QUESTIONS_FILE.read_text(encoding="utf-8") if OPEN_QUESTIONS_FILE.exists() else ""
-    if re.search(r"\?", content) and "No clarification needed" not in content:
-        print()
-        print(f"{C.BOLD}{C.YELLOW}  ACTION REQUIRED{C.RESET}")
-        print(f"  Review questions: {C.CYAN}{OPEN_QUESTIONS_FILE.relative_to(REPO_ROOT)}{C.RESET}")
-        print(f"  Write answers to: {C.CYAN}{OPEN_ANSWERS_FILE.relative_to(REPO_ROOT)}{C.RESET}")
-        print(f"  Then re-run:      {C.GREEN}ain run{C.RESET}")
-        print()
-        sys.exit(0)
 
 # ─────────────────────────────────────────────────────────────
 # Stage 4: Planning Generation (Codex)
 # ─────────────────────────────────────────────────────────────
 
 def run_planning_generation(state: dict, config: dict) -> None:
-    banner("Stage: Planning Generation (Codex)")
+    banner("Stage: Planning — Generation (Codex)")
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
-    q_content = OPEN_QUESTIONS_FILE.read_text(encoding="utf-8") if OPEN_QUESTIONS_FILE.exists() else ""
-    has_questions = re.search(r"\?", q_content) and "No clarification needed" not in q_content
-    if has_questions and not OPEN_ANSWERS_FILE.exists():
-        warn(f"Please create {OPEN_ANSWERS_FILE.relative_to(REPO_ROOT)} with your answers first.")
-        sys.exit(0)
+    codex_cmd = shutil.which("codex") or "codex"
+    docs_rel  = str(DOCS_DIR.relative_to(REPO_ROOT)).replace("\\", "/")
+    ctx_rel   = str(PIPELINE_DIR.relative_to(REPO_ROOT)).replace("\\", "/")
 
-    prompt_file = PROMPTS_DIR / "planning_generation_prompt.md"
-    if not prompt_file.exists():
-        raise RuntimeError(f"Missing prompt: {prompt_file}")
+    plan_prompt = (
+        f"Using {ctx_rel}/user_context.md, {docs_rel}/OPEN_QUESTIONS.md, "
+        f"and {docs_rel}/architecture.md, write a complete feature plan. "
+        f"Create three files in {docs_rel}/: "
+        f"PRD.md with sections (# Problem, # Goals, # Non Goals, # User Stories, # Success Criteria), "
+        f"DESIGN.md with sections (# Architecture Changes, # Data Model, # API Changes, # UI Changes, # Risks), "
+        f"FEATURE_SPEC.md with a detailed implementation spec. "
+        f"Do not ask questions — generate the complete documents now."
+    )
 
-    ctx_files = [f for f in [ARCHITECTURE_FILE, REPO_SUMMARY_FILE, OPEN_QUESTIONS_FILE, OPEN_ANSWERS_FILE] if f.exists()]
+    info("Opening Codex planning session in a new terminal window ...")
+    _open_popup_terminal("A.I.N. Planning", f'{codex_cmd} "{plan_prompt}"')
 
-    step(1, 2, "Building prompt ...")
-    prompt = build_prompt(prompt_file, *ctx_files)
+    print()
+    print(f"{C.BOLD}{C.YELLOW}  PLANNING IN PROGRESS{C.RESET}")
+    print(f"  Codex is generating the plan documents in the popup window.")
+    print(f"  It should create:")
+    for doc in [PRD_FILE, DESIGN_FILE, FEATURE_SPEC_FILE]:
+        print(f"    {C.CYAN}{doc.relative_to(REPO_ROOT)}{C.RESET}")
+    print()
+    _wait_for_user("Press Enter when Codex has finished generating the plan")
 
-    step(2, 2, "Calling planning agent ...")
-    output = call_agent("planning", prompt, config)
-    if not output.strip():
-        raise RuntimeError("Planning agent returned empty output.")
-
-    _parse_and_write_planning_docs(output)
+    for doc, headings, name in [
+        (PRD_FILE,          PRD_HEADINGS,    "PRD.md"),
+        (DESIGN_FILE,       DESIGN_HEADINGS, "DESIGN.md"),
+        (FEATURE_SPEC_FILE, [],              "FEATURE_SPEC.md"),
+    ]:
+        if not doc.exists():
+            warn(f"{name} not found — creating stub. Edit it before continuing.")
+            stub = "\n\n".join(f"{h}\n\n(Fill in)" for h in headings) if headings else "# Feature Specification\n\n(Fill in)"
+            doc.write_text(stub, encoding="utf-8")
 
     missing_prd = validate_headings(PRD_FILE, PRD_HEADINGS)
     if missing_prd:
-        raise RuntimeError(f"PRD validation failed. Missing: {missing_prd}")
+        warn(f"PRD.md is missing headings: {missing_prd}")
+        warn("Edit docs/PRD.md and re-run to continue.")
+        sys.exit(0)
 
     missing_design = validate_headings(DESIGN_FILE, DESIGN_HEADINGS)
     if missing_design:
-        raise RuntimeError(f"DESIGN validation failed. Missing: {missing_design}")
+        warn(f"DESIGN.md is missing headings: {missing_design}")
+        warn("Edit docs/DESIGN.md and re-run to continue.")
+        sys.exit(0)
 
     success("Planning documents validated.")
     set_stage("task_creation", state)
+
+
+def _strip_fences(content: str) -> str:
+    """Strip markdown code fences from file content written by agents."""
+    lines = content.strip().splitlines()
+    if lines and lines[0].startswith(chr(96)*3):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == chr(96)*3:
+        lines = lines[:-1]
+    return chr(10).join(lines).strip()
 
 
 def _parse_and_write_planning_docs(output: str) -> None:
@@ -716,7 +863,7 @@ def _parse_and_write_planning_docs(output: str) -> None:
     if matches:
         for m in matches:
             target = DOCS_DIR / m.group(1).strip()
-            target.write_text(m.group(2).strip(), encoding="utf-8")
+            target.write_text(_strip_fences(m.group(2)), encoding="utf-8")
             success(f"Written → {target.relative_to(REPO_ROOT)}")
     else:
         warn("Could not parse separate files. Writing raw output to PRD.md.")
@@ -773,7 +920,14 @@ def _parse_and_write_task_artifacts(output: str) -> None:
     if matches:
         for m in matches:
             target = DOCS_DIR / m.group(1).strip()
-            target.write_text(m.group(2).strip(), encoding="utf-8")
+            content = _strip_fences(m.group(2))
+            # For JSON files, validate and pretty-print
+            if target.suffix == ".json":
+                try:
+                    content = json.dumps(json.loads(content), indent=2)
+                except json.JSONDecodeError:
+                    pass
+            target.write_text(content, encoding="utf-8")
             success(f"Written → {target.relative_to(REPO_ROOT)}")
     else:
         json_match = re.search(r"```json\s*(.*?)\s*```", output, re.DOTALL)
@@ -1038,8 +1192,16 @@ def run_validation(state: dict, config: dict) -> None:
 
     for i, cmd in enumerate(cmds, start=1):
         cmd_list = cmd if isinstance(cmd, list) else cmd.split()
+        # Resolve executable path (handles .cmd/.exe wrappers on Windows)
+        resolved = shutil.which(cmd_list[0])
+        if resolved:
+            cmd_list = [resolved] + cmd_list[1:]
+        elif not Path(cmd_list[0]).is_absolute():
+            warn(f"Skipping: {cmd_list[0]} not found on PATH")
+            log_lines += [f"## {' '.join(str(c) for c in cmd_list)}", "Exit: SKIPPED (command not found)", ""]
+            continue
         cmd_str  = " ".join(str(c) for c in cmd_list)
-        step(i, len(cmds), f"Running: {cmd_str}")
+        step(i, len(cmds), f"Running: {' '.join(cmd if isinstance(cmd, list) else cmd.split())}")
 
         result = run_command(cmd_list, capture=True)
         passed = result.returncode == 0
@@ -1248,6 +1410,7 @@ def show_status(state: dict) -> None:
 STAGE_RUNNERS = {
     "scanning":            run_scan,
     "architecture":        run_architecture,
+    "user_context":        run_user_context,
     "planning_questions":  run_planning_questions,
     "planning_generation": run_planning_generation,
     "task_creation":       run_task_creation,

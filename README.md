@@ -27,19 +27,20 @@ The pipeline executes these stages in sequence:
 ```
 Repo Scan
   └─ Gemini → docs/architecture.md
-       └─ Codex → OPEN_QUESTIONS.md
-            └─ [you answer in OPEN_ANSWERS.md]
-                 └─ Codex → PRD.md, DESIGN.md, FEATURE_SPEC.md
-                      └─ ChiefLoop (or Claude) → TASKS.md, TASK_GRAPH.json
+       └─ [you describe the feature in an editor popup]
+            └─ Codex (interactive popup) → brainstorm + OPEN_QUESTIONS.md
+                 └─ Codex (interactive popup) → PRD.md, DESIGN.md, FEATURE_SPEC.md
+                      └─ Claude → TASKS.md, TASK_GRAPH.json
                            └─ [you approve]
                                 └─ Claude → implements tasks
                                      └─ Validation → tests/lint
                                           └─ Done
 ```
 
-Human involvement occurs at two points only:
-1. Answering planning questions
-2. Approving the task graph before implementation
+Human involvement occurs at three points:
+1. **Feature context** — describe what you want to build or fix
+2. **Brainstorm** — interactive back-and-forth with Codex in a popup terminal
+3. **Approval** — review the plan before implementation starts
 
 ---
 
@@ -47,11 +48,10 @@ Human involvement occurs at two points only:
 
 - Python 3.10+
 - Git
-- AI agent CLIs configured in `.ai-pipeline/config.json`:
+- AI agent CLIs (auto-installed by `ain init`):
   - [`gemini`](https://github.com/google-gemini/gemini-cli) — architecture stage
-  - [`codex`](https://github.com/openai/codex) — planning stage
-  - [`chiefloop`](https://github.com/PS229397/A.I.N.-Reborn) or `claude --print` — task creation stage
-  - [`claude`](https://claude.ai/claude-code) — implementation stage
+  - [`codex`](https://github.com/openai/codex) — planning + brainstorm stage
+  - [`claude`](https://claude.ai/claude-code) — task creation + implementation stage
 
 ---
 
@@ -63,22 +63,24 @@ pip install ain-pipeline
 
 # 2. Initialize the pipeline in your repo
 cd your-project
-ain init
+ain init        # scaffolds .ai-pipeline/, installs agent CLIs
 
-# 3. Configure your agents
-#    Edit .ai-pipeline/config.json
-
-# 4. Run
+# 3. Run
 ain run
 
-# 5. The pipeline pauses after planning questions — answer them:
-#    Edit docs/OPEN_ANSWERS.md, then continue:
-ain run
+# 4. Describe your feature in the editor that opens (Notepad on Windows)
+#    Save and press Enter in the terminal
 
-# 6. Review the plan, then approve:
+# 5. Brainstorm with Codex in the popup terminal
+#    When satisfied, press Enter in the terminal to continue
+
+# 6. Wait for Codex to generate the plan documents in another popup
+#    Press Enter when done
+
+# 7. Review the plan, then approve:
 ain --approve
 
-# 7. Pipeline runs implementation and validation automatically
+# 8. Pipeline runs implementation and validation automatically
 ```
 
 ---
@@ -89,7 +91,7 @@ ain --approve
 
 | Command | Description |
 |---|---|
-| `ain init` | Scaffold `.ai-pipeline/` into the current repo |
+| `ain init` | Scaffold `.ai-pipeline/` into the current repo and install agent CLIs |
 | `ain run` | Run pipeline from current stage |
 | `ain run --resume <stage>` | Resume from a specific stage |
 | `ain run --stage <stage>` | Run one stage only |
@@ -108,6 +110,7 @@ ain --approve
 idle
 scanning
 architecture
+user_context
 planning_questions
 planning_generation
 task_creation
@@ -122,6 +125,7 @@ Examples:
 ```bash
 ain run --resume architecture
 ain run --stage task_creation
+ain run --resume waiting_approval
 ```
 
 ---
@@ -143,11 +147,12 @@ ain run --stage task_creation
     "planning": {
       "command": "codex",
       "args": [],
-      "model": null
+      "model": null,
+      "prompt_mode": "arg"
     },
     "task_creation": {
-      "command": "chiefloop",
-      "args": [],
+      "command": "claude",
+      "args": ["--print"],
       "model": null
     },
     "implementation": {
@@ -159,30 +164,23 @@ ain run --stage task_creation
 }
 ```
 
-Set `"model"` to override an agent's default model. Each agent is invoked with the prompt piped via stdin and reads output from stdout.
+**`prompt_mode`** controls how the prompt is delivered to the agent:
+- `"stdin"` (default) — prompt is piped via stdin (works for Gemini, Claude)
+- `"arg"` — prompt is passed as a positional argument (required for Codex)
 
-### ChiefLoop (task creation agent)
+Set `"model"` to override an agent's default model.
 
-ChiefLoop is the task orchestration engine responsible for converting planning documents into a structured, dependency-ordered task graph (`TASKS.md` + `TASK_GRAPH.json`).
+### Planning stage — popup terminals
 
-The pipeline defaults `task_creation` to `claude --print` so it works out of the box without ChiefLoop installed. To use ChiefLoop when available:
+The planning stages open interactive popup terminal windows rather than running non-interactively. This lets you have a real conversation with Codex during brainstorm.
 
-```json
-{
-  "agents": {
-    "task_creation": {
-      "command": "chiefloop",
-      "args": [],
-      "model": null
-    }
-  }
-}
-```
+**Stage: `user_context`** — Opens your system editor (Notepad on Windows) with a template. Fill in the feature or bug description, save, and press Enter in the main terminal.
 
-Any agent used in this slot must:
-1. Accept a prompt on stdin
-2. Return output containing `<!-- FILE: TASKS.md -->` and `<!-- FILE: TASK_GRAPH.json -->` markers
-3. Exit 0 on success
+**Stage: `planning_questions`** — Opens a `cmd` window running Codex with the feature context pre-loaded. Codex asks clarifying questions; you answer. When done, Codex writes `docs/OPEN_QUESTIONS.md`. Press Enter in the main terminal to continue.
+
+**Stage: `planning_generation`** — Opens another `cmd` window with Codex tasked to write `PRD.md`, `DESIGN.md`, and `FEATURE_SPEC.md`. Press Enter when the files are written.
+
+If Codex doesn't write the files automatically, you can create them manually and then press Enter — the pipeline validates the headings and continues.
 
 ### Git settings
 
@@ -220,23 +218,24 @@ The pipeline auto-detects validation commands from your project type (Laravel, N
 
 ## File structure
 
-After `ain init`, your repo will contain:
+After `ain init` and a full run, your repo will contain:
 
 ```
 your-repo/
 ├── docs/
 │   ├── architecture.md                Generated by Gemini
-│   ├── OPEN_QUESTIONS.md              Generated by Codex
-│   ├── OPEN_ANSWERS.md                Written by you
+│   ├── OPEN_QUESTIONS.md              Generated by Codex (brainstorm output)
 │   ├── PRD.md                         Generated by Codex
 │   ├── DESIGN.md                      Generated by Codex
 │   ├── FEATURE_SPEC.md                Generated by Codex
-│   ├── TASKS.md                       Generated by ChiefLoop
-│   ├── TASK_GRAPH.json                Generated by ChiefLoop
+│   ├── TASKS.md                       Generated by Claude
+│   ├── TASK_GRAPH.json                Generated by Claude
 │   └── IMPLEMENTATION_LOG.md          Written by Claude
 └── .ai-pipeline/
     ├── state.json                     Pipeline state
     ├── config.json                    Agent configuration
+    ├── user_context.md                Your feature description
+    ├── brainstorm_context.md          Context sent to Codex for brainstorm
     ├── scan/
     │   ├── repo_tree.txt
     │   ├── tracked_files.txt
@@ -277,10 +276,9 @@ Any stage can be re-run with `ain run --resume <stage>`. If an agent produces ba
 
 ## Drop-in usage (no install)
 
-If you don't want a global install, clone this repo and copy `pipeline.py` into your project. It works identically to the `ain` CLI as long as the `ain/` package directory is alongside it:
+If you don't want a global install, clone this repo and copy `pipeline.py` into your project:
 
 ```bash
-# Clone or download pipeline.py + ain/ into your project
 python pipeline.py init
 python pipeline.py run
 python pipeline.py --status
@@ -305,13 +303,9 @@ Available shortcuts: `Pipeline — Run`, `Pipeline — Scan`, `Pipeline — Plan
 ```bash
 pip install build twine
 python -m build
-twine upload dist/*
-```
-
-Future releases:
-```bash
-# bump version in pyproject.toml, then:
-python -m build && twine upload dist/*
+python -m twine upload dist/*
+# Username: __token__
+# Password: <your PyPI API token>
 ```
 
 ---
@@ -326,17 +320,28 @@ ain --reset                        # or reset entirely
 ```
 
 **Agent command not found**
-Edit `.ai-pipeline/config.json` and set the correct `command` for the failing agent. Verify the CLI is on your PATH.
+Run `ain init` to auto-install missing agents. Or edit `.ai-pipeline/config.json` and set the correct `command`. Verify the CLI is on your PATH.
+
+**On Windows: agent not found even though it's installed**
+npm global installs on Windows create `.cmd` wrappers (e.g. `gemini.CMD`). The pipeline resolves these automatically using `shutil.which`. If it still fails, ensure the npm global bin directory is on your PATH:
+```powershell
+npm config get prefix   # note the path
+# Add <prefix> to your PATH in System Settings → Environment Variables
+```
 
 **Architecture validation failed**
 The architecture document is missing required headings. Open `docs/architecture.md`, add the missing sections, then:
 ```bash
-ain run --resume planning_questions
+ain run --resume user_context
 ```
 
-**Planning documents are malformed**
-The planning agent didn't use the required `<!-- FILE: name.md -->` markers. Check `.ai-pipeline/logs/planning_last_output.txt` for the raw output, fix the docs manually, then:
+**Codex popup closes immediately or produces no files**
+Codex may need to be configured with an API key. Run `codex` manually in a terminal to complete its setup. You can also create the planning documents manually and press Enter to continue.
+
+**TASK_GRAPH.json is invalid or empty**
+The agent may have wrapped JSON in a code fence. The pipeline strips these automatically as of v0.1.7. If you're on an older version, fix manually:
 ```bash
+pip install --upgrade ain-pipeline
 ain run --resume task_creation
 ```
 

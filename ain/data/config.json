@@ -10,6 +10,7 @@
       "command": "codex",
       "args": [],
       "model": null,
+      "prompt_mode": "arg",
       "description": "OpenAI Codex for planning — run: codex --version to verify"
     },
     "task_creation": {
