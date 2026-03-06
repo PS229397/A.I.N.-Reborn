@@ -1,0 +1,4 @@
+# AI Development Pipeline — Python dependencies
+# All are optional. The pipeline runs on stdlib alone.
+# colorama adds colored output on Windows terminals.
+colorama>=0.4.6

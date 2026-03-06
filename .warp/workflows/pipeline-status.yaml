@@ -1,0 +1,6 @@
+---
+name: Pipeline — Status
+command: python pipeline.py --status
+description: Show current pipeline stage and task progress
+tags:
+  - ai-pipeline

@@ -1,0 +1,6 @@
+---
+name: Pipeline — Plan
+command: python pipeline.py --resume planning_questions
+description: Resume pipeline from planning questions stage
+tags:
+  - ai-pipeline

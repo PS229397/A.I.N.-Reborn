@@ -1,0 +1,6 @@
+---
+name: Pipeline — Approve
+command: python pipeline.py --approve
+description: Approve planning artifacts and advance to implementation
+tags:
+  - ai-pipeline

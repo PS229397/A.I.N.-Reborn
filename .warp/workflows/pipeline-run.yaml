@@ -1,0 +1,6 @@
+---
+name: Pipeline — Run
+command: python pipeline.py
+description: Run the AI development pipeline from current stage
+tags:
+  - ai-pipeline
