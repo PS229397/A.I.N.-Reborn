@@ -350,11 +350,16 @@ def call_agent(agent_name: str, prompt: str, config: dict) -> str:
     extra_args= agent_cfg.get("args", [])
     model     = agent_cfg.get("model")
 
+    # Resolve full path so subprocess finds .cmd wrappers on Windows
+    resolved = shutil.which(command)
+    if resolved:
+        command = resolved
+
     cmd = [command] + extra_args
     if model:
         cmd += ["--model", model]
 
-    info(f"Invoking {command} ({agent_name}) ...")
+    info(f"Invoking {agent_cfg.get('command', agent_name)} ({agent_name}) ...")
     _log(f"AGENT CALL: {agent_name} via {command}")
 
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
