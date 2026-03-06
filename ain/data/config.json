@@ -13,10 +13,10 @@
       "description": "OpenAI Codex for planning — run: codex --version to verify"
     },
     "task_creation": {
-      "command": "claude",
-      "args": ["--print"],
+      "command": "chiefloop",
+      "args": [],
       "model": null,
-      "description": "ChiefLoop task creation stage — defaults to 'claude --print'. Change 'command' to 'chiefloop' (or your ChiefLoop CLI name) if ChiefLoop is installed."
+      "description": "ChiefLoop task orchestration engine — auto-installed by ain init"
     },
     "implementation": {
       "command": "claude",

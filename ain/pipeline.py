@@ -28,6 +28,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -135,8 +136,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "description": "Codex for planning and specification",
         },
         "task_creation": {
-            "command": "claude", "args": ["--print"], "model": None,
-            "description": "ChiefLoop task creation — defaults to claude --print. Change 'command' to 'chiefloop' if installed.",
+            "command": "chiefloop", "args": [], "model": None,
+            "description": "ChiefLoop task orchestration engine — auto-installed by ain init",
         },
         "implementation": {
             "command": "claude",
@@ -1060,6 +1061,94 @@ def run_validation(state: dict, config: dict) -> None:
     set_stage("done", state)
 
 # ─────────────────────────────────────────────────────────────
+# Agent CLI installation
+# ─────────────────────────────────────────────────────────────
+
+# Maps CLI command name → npm package to install if missing
+AGENT_NPM_PACKAGES: dict[str, str] = {
+    "gemini": "@google/gemini-cli",
+    "codex":  "@openai/codex",
+    "claude": "@anthropic-ai/claude-code",
+}
+
+# Maps CLI command name → curl install script URL
+AGENT_CURL_INSTALLS: dict[str, str] = {
+    "chiefloop": "https://raw.githubusercontent.com/minicodemonkey/chief/main/install.sh",
+}
+
+
+def _install_via_npm(command: str, pkg: str) -> bool:
+    """Install an npm package globally. Returns True on success."""
+    info(f"{command} — not found, installing {pkg} ...")
+    result = run_command(["npm", "install", "-g", pkg], capture=True, timeout=120)
+    if result.returncode == 0:
+        success(f"{command} — installed")
+        return True
+    error(f"{command} — installation failed")
+    warn(f"  Manual install: npm install -g {pkg}")
+    if result.stderr:
+        warn(f"  {result.stderr.strip()[:200]}")
+    return False
+
+
+def _install_via_curl(command: str, url: str) -> bool:
+    """Install via a remote shell script. Returns True on success."""
+    info(f"{command} — not found, installing via install script ...")
+    if not shutil.which("curl"):
+        error(f"{command} — curl not found, cannot run install script")
+        warn(f"  Manual install: curl -fsSL {url} | bash")
+        return False
+    result = run_command(f'curl -fsSL "{url}" | bash', capture=True, timeout=120)
+    if result.returncode == 0:
+        success(f"{command} — installed")
+        return True
+    error(f"{command} — installation failed")
+    warn(f"  Manual install: curl -fsSL {url} | bash")
+    if result.stderr:
+        warn(f"  {result.stderr.strip()[:200]}")
+    return False
+
+
+def install_agents(config: dict) -> None:
+    """Check each configured agent CLI and install any that are missing."""
+    print()
+    info("Checking agent CLIs ...")
+
+    has_npm = bool(shutil.which("npm"))
+    if not has_npm:
+        warn("npm not found — npm-based agents cannot be auto-installed.")
+        warn("Install Node.js from https://nodejs.org then re-run ain init")
+
+    agents   = config.get("agents", {})
+    seen     = set()
+    any_missing = False
+
+    for stage, agent_cfg in agents.items():
+        command = agent_cfg.get("command", "")
+        if not command or command in seen:
+            continue
+        seen.add(command)
+
+        if shutil.which(command):
+            success(f"{command} ({stage}) — already installed")
+        elif command in AGENT_CURL_INSTALLS:
+            any_missing = True
+            _install_via_curl(command, AGENT_CURL_INSTALLS[command])
+        elif command in AGENT_NPM_PACKAGES:
+            any_missing = True
+            if has_npm:
+                _install_via_npm(command, AGENT_NPM_PACKAGES[command])
+            else:
+                warn(f"{command} — skipped (npm not available)")
+        else:
+            warn(f"{command} ({stage}) — not found and no auto-install configured")
+            warn(f"  Install it manually and ensure it is on your PATH")
+
+    if not any_missing:
+        success("All agents available.")
+
+
+# ─────────────────────────────────────────────────────────────
 # ain init — scaffold pipeline into current repo
 # ─────────────────────────────────────────────────────────────
 
@@ -1102,6 +1191,8 @@ def run_init() -> None:
             success(f"Created {target.relative_to(REPO_ROOT)}")
         else:
             info(f"Skipped {target.relative_to(REPO_ROOT)} (already exists)")
+
+    install_agents(load_config())
 
     print()
     success("Pipeline initialized.")
