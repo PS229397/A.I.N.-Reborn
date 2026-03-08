@@ -1,7 +1,14 @@
 {
-  "current_stage": "idle",
+  "current_stage": "failed",
   "branch": null,
-  "started_at": null,
-  "last_updated": "2026-03-06T10:23:25.419433+00:00",
-  "completed_stages": []
+  "started_at": "2026-03-08T15:29:50.044285+00:00",
+  "last_updated": "2026-03-08T15:53:19.225795+00:00",
+  "completed_stages": [
+    "scanning",
+    "architecture",
+    "user_context",
+    "planning_questions",
+    "planning_generation"
+  ],
+  "failure_reason": "Agent command not found: 'chiefloop'. Edit .ai-pipeline/config.json to configure the 'task_creation' agent."
 }

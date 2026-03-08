@@ -140,8 +140,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "description": "Codex for planning and specification",
         },
         "task_creation": {
-            "command": "chiefloop", "args": [], "model": None,
-            "description": "ChiefLoop task orchestration engine — auto-installed by ain init",
+            "command": "chief", "args": [], "model": None,
+            "description": "Chief task orchestration engine — auto-installed by ain init",
         },
         "implementation": {
             "command": "claude",
@@ -877,11 +877,11 @@ def _parse_and_write_planning_docs(output: str) -> None:
             FEATURE_SPEC_FILE.write_text("# Feature Specification\n\n", encoding="utf-8")
 
 # ─────────────────────────────────────────────────────────────
-# Stage 5: Task Creation (ChiefLoop)
+# Stage 5: Task Creation (Chief)
 # ─────────────────────────────────────────────────────────────
 
 def run_task_creation(state: dict, config: dict) -> None:
-    banner("Stage: Task Creation (ChiefLoop)")
+    banner("Stage: Task Creation (Chief)")
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
     prompt_file = PROMPTS_DIR / "task_creation_prompt.md"
@@ -1037,6 +1037,74 @@ def commit_implementation(state: dict, config: dict) -> None:
         success("Changes committed.")
     except Exception as e:
         warn(f"Git commit failed: {e}")
+
+
+# ─────────────────────────────────────────────────────────────
+# Workspace cleanup
+# ─────────────────────────────────────────────────────────────
+
+# Generated files that belong to a single pipeline run, not the tool itself.
+_CLEAN_FILES = [
+    # Planning & architecture docs
+    DOCS_DIR / "architecture.md",
+    DOCS_DIR / "PRD.md",
+    DOCS_DIR / "DESIGN.md",
+    DOCS_DIR / "FEATURE_SPEC.md",
+    DOCS_DIR / "OPEN_QUESTIONS.md",
+    DOCS_DIR / "OPEN_ANSWERS.md",
+    # Task artifacts
+    DOCS_DIR / "TASKS.md",
+    DOCS_DIR / "TASK_GRAPH.json",
+    # Run logs & reports
+    DOCS_DIR / "IMPLEMENTATION_LOG.md",
+    DOCS_DIR / "VERIFICATION_REPORT.md",
+    # Pipeline session files
+    PIPELINE_DIR / "user_context.md",
+    PIPELINE_DIR / "brainstorm_context.md",
+]
+
+_CLEAN_DIRS = [
+    PIPELINE_DIR / "scan",
+    PIPELINE_DIR / "logs",
+    PIPELINE_DIR / "approvals",
+    PIPELINE_DIR / "state",
+]
+
+
+def clean_workspace(silent: bool = False) -> None:
+    """Delete all per-run generated files and reset pipeline state to idle.
+
+    Preserves: config.json, prompts/, CLAUDE.md, and all source code.
+    Called automatically after a successful auto-commit, or manually via --clean.
+    """
+    removed: list[str] = []
+
+    for f in _CLEAN_FILES:
+        if f.exists():
+            f.unlink()
+            removed.append(str(f.relative_to(REPO_ROOT)))
+
+    for d in _CLEAN_DIRS:
+        if d.exists():
+            shutil.rmtree(d)
+            removed.append(str(d.relative_to(REPO_ROOT)) + "/")
+
+    # Reset state to idle (keeps config intact)
+    save_state({
+        "current_stage": "idle",
+        "branch": None,
+        "started_at": None,
+        "last_updated": None,
+        "completed_stages": [],
+    })
+
+    if not silent:
+        if removed:
+            for item in removed:
+                info(f"Removed: {item}")
+        else:
+            info("Nothing to clean.")
+        success("Workspace cleaned. Ready for next implementation.")
 
 # ─────────────────────────────────────────────────────────────
 # Stage 7: Implementation (Claude)
@@ -1227,6 +1295,11 @@ def run_validation(state: dict, config: dict) -> None:
     success("All validation checks passed.")
     set_stage("done", state)
 
+    # Clean generated artifacts after a successful auto-commit
+    if config["git"]["auto_commit"]:
+        banner("Cleaning workspace for next run")
+        clean_workspace()
+
 # ─────────────────────────────────────────────────────────────
 # Agent CLI installation
 # ─────────────────────────────────────────────────────────────
@@ -1240,7 +1313,7 @@ AGENT_NPM_PACKAGES: dict[str, str] = {
 
 # Maps CLI command name → curl install script URL
 AGENT_CURL_INSTALLS: dict[str, str] = {
-    "chiefloop": "https://raw.githubusercontent.com/minicodemonkey/chief/main/install.sh",
+    "chief": "https://raw.githubusercontent.com/minicodemonkey/chief/main/install.sh",
 }
 
 
@@ -1493,6 +1566,7 @@ def main() -> None:
               ain --status                   Show pipeline status
               ain --approve                  Approve planning artifacts
               ain --reset                    Reset to idle
+              ain --clean                    Remove all generated files, reset to idle
         """),
     )
 
@@ -1510,6 +1584,7 @@ def main() -> None:
     parser.add_argument("--status",  action="store_true", help="Show pipeline status")
     parser.add_argument("--approve", action="store_true", help="Approve planning artifacts")
     parser.add_argument("--reset",   action="store_true", help="Reset pipeline to idle")
+    parser.add_argument("--clean",   action="store_true", help="Remove all generated files and reset to idle")
 
     args = parser.parse_args()
 
@@ -1526,6 +1601,11 @@ def main() -> None:
         if PLANNING_APPROVED_FLAG.exists():
             PLANNING_APPROVED_FLAG.unlink()
         success("Pipeline reset to idle.")
+        return
+
+    if args.clean:
+        banner("A.I.N. Pipeline — Clean")
+        clean_workspace()
         return
 
     if args.approve:

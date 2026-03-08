@@ -14,10 +14,10 @@
       "description": "OpenAI Codex for planning — run: codex --version to verify"
     },
     "task_creation": {
-      "command": "chiefloop",
+      "command": "chief",
       "args": [],
       "model": null,
-      "description": "ChiefLoop task orchestration engine — auto-installed by ain init"
+      "description": "Chief autonomous PRD agent — auto-installed by ain init"
     },
     "implementation": {
       "command": "claude",
