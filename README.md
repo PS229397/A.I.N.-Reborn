@@ -4,20 +4,9 @@ A local multi-agent orchestrator for structured, reproducible AI-assisted develo
 
 Coordinates Gemini, Codex, ChiefLoop, and Claude through deterministic stages — producing planning artifacts before touching any code, and requiring human approval before implementation begins.
 
-```text
-┌──────────────────────────────────────────────────────────────────────────────────────────────┐
-│  ▸ A.I.N. v0.1.8  ║  SYS: RUNNING  ║  UPTIME: 0s  ║  NODE: 527af                           │
-├───────────────────────────────────┬──────────────────────────────────────────────────────────┤
-│  // DECK                          │  // DATA FEED                                            │
-│  ▶ scanning                       │  12:41:03 [INF] Repo scan started                        │
-│  ▶ architecture                   │  12:41:08 [INF] architecture.md generated                │
-│    ▷ codex /planner/ 0.7s         │  12:41:11 [INF] OPEN_QUESTIONS.md updated               │
-│  ◈ planning_generation            │  12:41:15 [INF] waiting for approval                     │
-│  ◆ task_creation                  │                                                          │
-├───────────────────────────────────┴──────────────────────────────────────────────────────────┤
-│  Q jack out  R reboot  L data feed  C sys.config  S density  ? help.sys  F freeze  ↑/↓ scroll │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
-```
+<p align="center">
+    <img src="assets/tui-screenshot.png" alt="A.I.N. Pipeline TUI" width="1100" />
+</p>
 
 ---
 
