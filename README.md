@@ -48,7 +48,7 @@ Human involvement occurs at three points:
 
 - Python 3.10+
 - Git
-- AI agent CLIs (auto-installed by `ain init`):
+- AI agent CLIs available on your PATH:
   - [`gemini`](https://github.com/google-gemini/gemini-cli) — architecture stage
   - [`codex`](https://github.com/openai/codex) — planning + brainstorm stage
   - [`claude`](https://claude.ai/claude-code) — task creation + implementation stage
@@ -61,11 +61,10 @@ Human involvement occurs at three points:
 # 1. Install
 pip install ain-pipeline
 
-# 2. Initialize the pipeline in your repo
+# 2. Enter your repo
 cd your-project
-ain init        # scaffolds .ai-pipeline/, installs agent CLIs
 
-# 3. Run
+# 3. Run (creates .ai-pipeline/config.json automatically if missing)
 ain run
 
 # 4. Describe your feature in the editor that opens (Notepad on Windows)
@@ -78,7 +77,7 @@ ain run
 #    Press Enter when done
 
 # 7. Review the plan, then approve:
-ain --approve
+ain approve
 
 # 8. Pipeline runs implementation and validation automatically
 ```
@@ -91,18 +90,46 @@ ain --approve
 
 | Command | Description |
 |---|---|
-| `ain init` | Scaffold `.ai-pipeline/` into the current repo and install agent CLIs |
 | `ain run` | Run pipeline from current stage |
 | `ain run --resume <stage>` | Resume from a specific stage |
-| `ain run --stage <stage>` | Run one stage only |
+| `ain approve [--run-id <id>]` | Approve a pending stage |
+| `ain status` | Show current pipeline status |
+| `ain reset [--hard] [--yes]` | Reset pipeline state |
+| `ain logs [--follow] [--tail N] [--level L] [--source S] [--json]` | View/stream merged logs |
+| `ain config <list|get|set|reset>` | Manage layered config |
+| `ain version [--short]` | Show version |
 
-### Flags
+### `ain run` options
 
-| Flag | Description |
+| Option | Description |
 |---|---|
-| `ain --status` | Show current stage and task progress |
-| `ain --approve` | Approve planning artifacts, advance to implementation |
-| `ain --reset` | Reset pipeline to idle (clears all state) |
+| `--plain` | Disable TUI and print plain line output |
+| `--tui rich|textual` | Select renderer (non-TTY falls back to plain) |
+| `--no-color` | Disable ANSI colours via `NO_COLOR=1` |
+| `--resume <stage>` | Resume from a specific stage |
+
+### TUI behavior (Rich Live)
+
+- Default renderer in TTY mode is Rich Live (`--tui rich`).
+- Panels support keyboard controls:
+  - `Q` quit (with confirmation while active)
+  - `R` reboot current run
+  - `L` toggle log/data-feed focus
+  - `C` toggle config view
+  - `S` toggle compact deck density
+  - `?` toggle help overlay
+  - `F` freeze/unfreeze log autoscroll
+  - `↑` / `↓` scroll the feed
+  - `A` approve when awaiting approval
+- Theme: neon cyan + red-pink accents (panel borders/titles and status accents).
+
+### Legacy aliases (deprecated, still accepted)
+
+| Old flag | Replacement |
+|---|---|
+| `ain --status` | `ain status` |
+| `ain --approve` | `ain approve` |
+| `ain --reset` | `ain reset` |
 
 ### Stages
 
@@ -124,7 +151,6 @@ Examples:
 
 ```bash
 ain run --resume architecture
-ain run --stage task_creation
 ain run --resume waiting_approval
 ```
 
@@ -132,7 +158,7 @@ ain run --resume waiting_approval
 
 ## Configuration
 
-`ain init` writes `.ai-pipeline/config.json` to your repo. Edit it to configure agent commands, git behaviour, and validation.
+`ain run` creates `.ai-pipeline/config.json` if needed. Edit it to configure agent commands, git behaviour, and validation.
 
 ### Agent commands
 
@@ -218,7 +244,7 @@ The pipeline auto-detects validation commands from your project type (Laravel, N
 
 ## File structure
 
-After `ain init` and a full run, your repo will contain:
+After first run and a full pipeline pass, your repo will contain:
 
 ```
 your-repo/
@@ -247,7 +273,7 @@ your-repo/
     │   ├── task_creation_prompt.md
     │   └── implementation_prompt.md
     ├── approvals/
-    │   └── planning_approved.flag     Created by ain --approve
+    │   └── planning_approved.flag     Created by ain approve
     └── logs/
         ├── pipeline.log
         ├── validation.log
@@ -276,12 +302,12 @@ Any stage can be re-run with `ain run --resume <stage>`. If an agent produces ba
 
 ## Drop-in usage (no install)
 
-If you don't want a global install, clone this repo and copy `pipeline.py` into your project:
+If you don't want a global install, run from a clone of this repo:
 
 ```bash
-python pipeline.py init
-python pipeline.py run
-python pipeline.py --status
+python -m ain run
+python -m ain status
+python -m ain logs --tail 100
 ```
 
 ---
@@ -314,13 +340,13 @@ python -m twine upload dist/*
 
 **Pipeline is stuck in `failed` state**
 ```bash
-ain --status                       # see the failure reason
+ain status                         # see the failure reason
 ain run --resume <stage>           # resume after fixing the issue
-ain --reset                        # or reset entirely
+ain reset                          # or reset entirely
 ```
 
 **Agent command not found**
-Run `ain init` to auto-install missing agents. Or edit `.ai-pipeline/config.json` and set the correct `command`. Verify the CLI is on your PATH.
+Install the missing CLI (`gemini`, `codex`, or `claude`), then verify it is on your PATH. You can also edit `.ai-pipeline/config.json` and set the correct `command`.
 
 **On Windows: agent not found even though it's installed**
 npm global installs on Windows create `.cmd` wrappers (e.g. `gemini.CMD`). The pipeline resolves these automatically using `shutil.which`. If it still fails, ensure the npm global bin directory is on your PATH:
@@ -350,3 +376,21 @@ Check `.ai-pipeline/logs/validation.log`. Fix the issues in the codebase, then:
 ```bash
 ain run --resume validation
 ```
+
+---
+
+## Migration Guide
+
+### Upgrading from pre-v1 (flag-based interface)
+
+The original interface used global flags (`ain --reset`, `ain --approve`, `ain --status`).
+These are still accepted but will print a `DeprecationWarning` and **will be removed in v2.0.0**.
+
+| Old command | New command |
+|---|---|
+| `ain --reset` | `ain reset` |
+| `ain --approve` | `ain approve` |
+| `ain --status` | `ain status` |
+| `ain --resume <stage>` | `ain run --resume <stage>` |
+
+Update your scripts before upgrading to v2.0.0 to avoid breakage.

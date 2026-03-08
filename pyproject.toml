@@ -26,6 +26,8 @@ classifiers = [
 ]
 dependencies = [
     "colorama>=0.4.6",
+    "click>=8.1",
+    "rich>=13.0",
 ]
 
 [project.urls]
@@ -34,7 +36,7 @@ Repository = "https://github.com/PS229397/A.I.N.-Reborn"
 Issues = "https://github.com/PS229397/A.I.N.-Reborn/issues"
 
 [project.scripts]
-ain = "ain.pipeline:main"
+ain = "ain.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

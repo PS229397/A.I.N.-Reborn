@@ -27,6 +27,7 @@ Thumbs.db
 node_modules/
 
 # AI pipeline — runtime state (generated per run, not part of the tool)
+.ai-pipeline/config.json
 .ai-pipeline/state.json
 .ai-pipeline/logs/
 .ai-pipeline/scan/

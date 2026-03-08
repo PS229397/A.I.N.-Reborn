@@ -27,14 +27,38 @@ import argparse
 import json
 import os
 import platform
+import queue
 import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from textwrap import dedent
 from typing import Any
+
+from ain.runtime.emitter import Emitter
+from ain.runtime.events import (
+    ApprovalReceived,
+    AwaitingApproval,
+    LogLevel,
+    LogLine,
+    LogSource,
+    RunCompleted,
+    RunStarted,
+    RunStatus,
+    StageCompleted,
+    StageFailed,
+    StageQueued,
+    StageStarted,
+    TaskCompleted,
+    TaskFailed,
+    TaskStarted,
+)
 
 # ─────────────────────────────────────────────────────────────
 # Paths  (REPO_ROOT = cwd so the package works in any repo)
@@ -204,28 +228,101 @@ class C:
     WHITE   = "\033[97m" if _USE_COLOR else ""
 
 
-def banner(text: str) -> None:
-    w = 62
-    print(f"\n{C.BOLD}{C.CYAN}{'─' * w}{C.RESET}")
-    print(f"{C.BOLD}{C.CYAN}  {text}{C.RESET}")
-    print(f"{C.BOLD}{C.CYAN}{'─' * w}{C.RESET}\n")
+def _emit_log(message: str, level: LogLevel) -> None:
+    """Emit a LogLine event if an emitter is active (non-blocking)."""
+    if _EMITTER is not None:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _emit(LogLine(ts=ts, level=level, source=LogSource.PIPELINE, stage_id=None, message=message))
 
-def info(text: str)    -> None: print(f"{C.BLUE}  ▸{C.RESET} {text}")
-def success(text: str) -> None: print(f"{C.GREEN}  ✓{C.RESET} {text}")
-def warn(text: str)    -> None: print(f"{C.YELLOW}  ⚠{C.RESET} {text}")
-def error(text: str)   -> None: print(f"{C.RED}  ✗{C.RESET} {text}", file=sys.stderr)
+
+def banner(text: str) -> None:
+    if _EMITTER is None:   # plain mode: print to terminal
+        w = 62
+        print(f"\n{C.BOLD}{C.CYAN}{'─' * w}{C.RESET}")
+        print(f"{C.BOLD}{C.CYAN}  {text}{C.RESET}")
+        print(f"{C.BOLD}{C.CYAN}{'─' * w}{C.RESET}\n")
+    _emit_log(f"━━━  {text}  ━━━", LogLevel.INFO)
+
+def info(text: str) -> None:
+    if _EMITTER is None:
+        print(f"{C.BLUE}  ▸{C.RESET} {text}")
+    _emit_log(f"▸ {text}", LogLevel.INFO)
+
+def success(text: str) -> None:
+    if _EMITTER is None:
+        print(f"{C.GREEN}  ✓{C.RESET} {text}")
+    _emit_log(f"✓ {text}", LogLevel.INFO)
+
+def warn(text: str) -> None:
+    if _EMITTER is None:
+        print(f"{C.YELLOW}  ⚠{C.RESET} {text}")
+    _emit_log(f"⚠ {text}", LogLevel.WARN)
+
+def error(text: str) -> None:
+    if _EMITTER is None:
+        print(f"{C.RED}  ✗{C.RESET} {text}", file=sys.stderr)
+    _emit_log(f"✗ {text}", LogLevel.ERROR)
+
 def step(n: int, total: int, text: str) -> None:
-    print(f"{C.BOLD}{C.WHITE}  [{n}/{total}]{C.RESET} {text}")
+    if _EMITTER is None:
+        print(f"{C.BOLD}{C.WHITE}  [{n}/{total}]{C.RESET} {text}")
+    _emit_log(f"[{n}/{total}] {text}", LogLevel.INFO)
+
+# ─────────────────────────────────────────────────────────────
+# Event bus state
+# ─────────────────────────────────────────────────────────────
+
+_EMITTER: Emitter | None = None
+_RUN_ID: str = ""
+
+# Optional TUI renderer with suspend/resume capability.
+# Set by run_pipeline() when a Rich renderer is active so that interactive
+# input prompts can temporarily hand the terminal back to cooked mode.
+_RENDERER: Any = None
+
+# Protects log-file writes and task-graph updates when tasks run in parallel.
+_LOG_LOCK    = threading.Lock()
+_GRAPH_LOCK  = threading.Lock()
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _emit(event: Any) -> None:
+    if _EMITTER is not None:
+        _EMITTER.emit(event)
+
+
+def _tui_suspend() -> None:
+    """Pause the TUI (if active) before a blocking input() prompt."""
+    if _RENDERER is not None and hasattr(_RENDERER, "suspend"):
+        try:
+            _RENDERER.suspend()
+        except Exception:
+            pass
+
+
+def _tui_resume() -> None:
+    """Resume the TUI (if active) after a blocking input() prompt."""
+    if _RENDERER is not None and hasattr(_RENDERER, "resume"):
+        try:
+            _RENDERER.resume()
+        except Exception:
+            pass
+
 
 # ─────────────────────────────────────────────────────────────
 # Logging
 # ─────────────────────────────────────────────────────────────
 
-def _log(message: str) -> None:
+def _log(message: str, *, stage_id: str | None = None) -> None:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    with open(PIPELINE_LOG, "a", encoding="utf-8") as f:
-        f.write(f"[{ts}] {message}\n")
+    with _LOG_LOCK:
+        with open(PIPELINE_LOG, "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {message}\n")
+    _emit(LogLine(ts=ts, level=LogLevel.INFO, source=LogSource.PIPELINE, stage_id=stage_id, message=message))
 
 # ─────────────────────────────────────────────────────────────
 # State management
@@ -684,19 +781,130 @@ def _open_in_editor(path: Path) -> None:
 def _open_popup_terminal(title: str, command: str) -> None:
     """Open a new terminal window running the given shell command."""
     if platform.system() == "Windows":
-        subprocess.Popen(f'start "{title}" cmd /k {command}', shell=True)
+        # Write the command to a temp batch file to avoid multi-layer quoting
+        # issues with cmd's `start "title" cmd /k <command>` parsing.
+        # list2cmdline double-escapes pre-quoted title strings, causing Windows
+        # to interpret words in the title as the executable name.
+        import tempfile
+        bat = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".bat", delete=False, encoding="utf-8"
+        )
+        bat.write(f"@echo off\r\n{command}\r\n")
+        bat.close()
+        safe_title = title.replace('"', "'")
+        subprocess.Popen(
+            ["cmd", "/c", "start", safe_title, "cmd", "/k", bat.name],
+            shell=False,
+        )
     elif platform.system() == "Darwin":
-        script = f'tell application "Terminal" to do script "{command}"'
+        # Escape embedded double-quotes before embedding in AppleScript.
+        safe_cmd = command.replace("\\", "\\\\").replace('"', '\\"')
+        script = f'tell application "Terminal" to do script "{safe_cmd}"'
         subprocess.Popen(["osascript", "-e", script])
     else:
-        for term in ["gnome-terminal --", "xterm -e", "konsole -e"]:
-            exe = term.split()[0]
+        # Use list-form exec — no shell=True, no injection.
+        for term_prefix in [
+            ["gnome-terminal", "--"],
+            ["xterm", "-e"],
+            ["konsole", "-e"],
+        ]:
+            exe = term_prefix[0]
             if shutil.which(exe):
-                subprocess.Popen(f'{term} bash -c "{command}; bash"', shell=True)
+                subprocess.Popen(term_prefix + ["bash", "-c", f"{command}; exec bash"])
                 break
 
 
+def _run_interactive_in_tui(cmd: list[str]) -> None:
+    """Run an interactive subprocess with I/O routed through the TUI.
+
+    stdout/stderr lines are emitted as LogLine events (visible in the stream
+    panel).  User responses are collected via the TUI input panel
+    (``request_input``) or plain ``input()`` in non-TUI mode.
+
+    Idle detection: after ``_IDLE_SECS`` of silence the process is assumed to
+    be waiting for user input.  The user can type ``done`` / ``exit`` /
+    ``quit`` to terminate early.
+    """
+    _IDLE_SECS = 0.4   # silence threshold before requesting input
+    _POLL_MS   = 0.05  # output-reader poll interval
+
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    line_q: queue.Queue[str | None] = queue.Queue()
+
+    def _reader() -> None:
+        try:
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                line_q.put(raw.rstrip("\n\r"))
+        finally:
+            line_q.put(None)  # sentinel: subprocess finished
+
+    threading.Thread(target=_reader, daemon=True).start()
+
+    last_output = time.monotonic()
+
+    while True:
+        # Drain all available output with a short poll.
+        try:
+            line = line_q.get(timeout=_POLL_MS)
+            if line is None:          # sentinel → process exited
+                return
+            if line:
+                _emit_log(line, LogLevel.INFO)
+                last_output = time.monotonic()
+            continue                  # keep draining
+        except queue.Empty:
+            pass
+
+        if proc.poll() is not None:   # exited between polls
+            return
+
+        idle = time.monotonic() - last_output
+        if idle < _IDLE_SECS:
+            continue                  # not idle yet
+
+        # ── Request input from the user ──────────────────────────
+        if _RENDERER is not None and hasattr(_RENDERER, "request_input"):
+            user_input = _RENDERER.request_input(
+                "Your response  (type 'done' to end session)"
+            )
+        else:
+            try:
+                user_input = input("> ")
+            except (EOFError, KeyboardInterrupt):
+                proc.terminate()
+                return
+
+        if user_input.strip().lower() in ("done", "exit", "quit", "q"):
+            proc.terminate()
+            proc.wait()
+            return
+
+        try:
+            assert proc.stdin is not None
+            proc.stdin.write(user_input + "\n")
+            proc.stdin.flush()
+        except BrokenPipeError:
+            return
+
+        last_output = time.monotonic()  # reset idle clock after sending input
+
+
 def _wait_for_user(prompt: str) -> None:
+    """Block until the user acknowledges.  In TUI mode the input panel is used;
+    in plain mode a regular input() call is made."""
+    if _RENDERER is not None and hasattr(_RENDERER, "request_input"):
+        _RENDERER.request_input(prompt)
+        return
+    # Plain/fallback mode: standard terminal input.
     print()
     try:
         input(f"  {prompt} → ")
@@ -761,19 +969,11 @@ def run_planning_questions(state: dict, config: dict) -> None:
         f"When we reach full clarity, write a clean Q&A summary to {out_path}."
     )
 
-    info("Opening Codex brainstorm session in a new terminal window ...")
+    info("Starting Codex brainstorm session inside the TUI ...")
     info(f"Context: {brainstorm_context.relative_to(REPO_ROOT)}")
-    _open_popup_terminal("A.I.N. Brainstorm", f'{codex_cmd} "{brainstorm_prompt}"')
-
-    print()
-    print(f"{C.BOLD}{C.YELLOW}  BRAINSTORM IN PROGRESS{C.RESET}")
-    print(f"  Codex is running in the popup window.")
-    print(f"  Have your back-and-forth conversation there.")
-    print(f"  When done, Codex should have written:")
-    print(f"    {C.CYAN}{OPEN_QUESTIONS_FILE.relative_to(REPO_ROOT)}{C.RESET}")
-    print(f"  If it did not, create that file manually with your Q&A summary.")
-    print()
-    _wait_for_user("Press Enter when your brainstorm session is complete")
+    info(f"When Codex finishes clarifying, it will write: {OPEN_QUESTIONS_FILE.relative_to(REPO_ROOT)}")
+    info("Type 'done' in the input bar to end the session early.")
+    _run_interactive_in_tui([codex_cmd, brainstorm_prompt])
 
     if not OPEN_QUESTIONS_FILE.exists():
         warn("OPEN_QUESTIONS.md not found. Creating placeholder.")
@@ -854,6 +1054,18 @@ def _strip_fences(content: str) -> str:
     return chr(10).join(lines).strip()
 
 
+def _safe_doc_path(filename: str) -> Path:
+    """Resolve a docs-relative filename and ensure it stays within DOCS_DIR."""
+    target = (DOCS_DIR / filename.strip()).resolve()
+    try:
+        target.relative_to(DOCS_DIR.resolve())
+    except ValueError:
+        raise RuntimeError(
+            f"Path traversal blocked: '{filename}' would escape the docs directory."
+        )
+    return target
+
+
 def _parse_and_write_planning_docs(output: str) -> None:
     pattern = re.compile(
         r"<!--\s*FILE:\s*(?:docs/)?(\S+?)\s*-->(.*?)<!--\s*END:\s*(?:docs/)?\S+?\s*-->",
@@ -862,7 +1074,11 @@ def _parse_and_write_planning_docs(output: str) -> None:
     matches = list(pattern.finditer(output))
     if matches:
         for m in matches:
-            target = DOCS_DIR / m.group(1).strip()
+            try:
+                target = _safe_doc_path(m.group(1))
+            except RuntimeError as e:
+                warn(str(e))
+                continue
             target.write_text(_strip_fences(m.group(2)), encoding="utf-8")
             success(f"Written → {target.relative_to(REPO_ROOT)}")
     else:
@@ -1043,7 +1259,11 @@ def _parse_and_write_task_artifacts(output: str) -> None:
     matches = list(pattern.finditer(output))
     if matches:
         for m in matches:
-            target = DOCS_DIR / m.group(1).strip()
+            try:
+                target = _safe_doc_path(m.group(1))
+            except RuntimeError as e:
+                warn(str(e))
+                continue
             content = _strip_fences(m.group(2))
             # For JSON files, validate and pretty-print
             if target.suffix == ".json":
@@ -1071,28 +1291,6 @@ def _parse_and_write_task_artifacts(output: str) -> None:
         _build_task_graph_from_tasks_md()
 
 
-def _build_task_graph_from_tasks_md() -> None:
-    if not TASKS_FILE.exists():
-        return
-    content = TASKS_FILE.read_text(encoding="utf-8")
-    tasks = []
-    for i, m in enumerate(re.finditer(r"- \[( |x)\] (.+)", content), start=1):
-        tasks.append({
-            "id": i,
-            "description": m.group(2).strip(),
-            "depends_on": [i - 1] if i > 1 else [],
-            "status": "completed" if m.group(1) == "x" else "pending",
-            "files_affected": [],
-            "completed_at": None,
-        })
-    graph = {
-        "tasks": tasks,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "total": len(tasks),
-        "completed": sum(1 for t in tasks if t["status"] == "completed"),
-    }
-    TASK_GRAPH_FILE.write_text(json.dumps(graph, indent=2), encoding="utf-8")
-
 # ─────────────────────────────────────────────────────────────
 # Stage 6: Approval Gate
 # ─────────────────────────────────────────────────────────────
@@ -1104,6 +1302,8 @@ def run_waiting_approval(state: dict, config: dict) -> None:
         success("Planning approved. Advancing to implementation.")
         set_stage("implementation", state)
         return
+
+    _emit(AwaitingApproval(run_id=_RUN_ID, stage_id="waiting_approval"))
 
     print(f"\n{C.BOLD}{C.YELLOW}  APPROVAL REQUIRED{C.RESET}")
     print()
@@ -1233,6 +1433,282 @@ def clean_workspace(silent: bool = False) -> None:
         success("Workspace cleaned. Ready for next implementation.")
 
 # ─────────────────────────────────────────────────────────────
+# Token-limit fallback helpers
+# ─────────────────────────────────────────────────────────────
+
+_TOKEN_LIMIT_PHRASES = [
+    "context window", "token limit", "maximum context", "too long",
+    "prompt is too", "input too long", "context length", "max_tokens",
+    "context_length_exceeded", "rate limit", "overloaded",
+    "reduce the length",
+]
+
+
+def is_token_limit_error(output: str, returncode: int) -> bool:
+    """Return True if the agent output/exit looks like a context or token-limit error."""
+    if returncode == 0:
+        return False
+    combined = output.lower()
+    return any(phrase in combined for phrase in _TOKEN_LIMIT_PHRASES)
+
+
+def rollback_implementation_files() -> list[str]:
+    """Roll back unstaged changes introduced by a failed task via git checkout."""
+    rolled_back: list[str] = []
+    try:
+        status_out = run_command_output(["git", "status", "--porcelain"])
+        for line in status_out.splitlines():
+            if len(line) > 3 and line[:2] in (" M", "M ", "A ", " A"):
+                fpath = line[3:].strip().strip('"')
+                result = run_command(["git", "checkout", "--", fpath], capture=True)
+                if result.returncode == 0:
+                    rolled_back.append(fpath)
+    except RuntimeError as e:
+        warn(f"Rollback failed: {e}")
+    return rolled_back
+
+
+def invoke_codex_fallback(task_prompt: str, config: dict) -> str:
+    """Invoke the planning (codex) agent as a fallback for an oversized task."""
+    fallback_cfg = config.get("agents", {}).get("planning", {})
+    cmd = fallback_cfg.get("command", "")
+    if not cmd or not shutil.which(cmd):
+        raise RuntimeError(
+            "Codex fallback requested but 'planning' agent is not available. "
+            "Install codex and configure it in .ai-pipeline/config.json."
+        )
+    info("Invoking codex fallback agent ...")
+    return call_agent("planning", task_prompt, config)
+
+
+def notify_fallback_and_get_decision(context: str, timeout_secs: int = 30) -> bool:
+    """Inform the user of a token-limit event and ask whether to switch to codex.
+
+    Returns True to use the fallback, False to skip the task.
+    """
+    warn("Token/context limit detected for this task.")
+    print(f"\n{C.YELLOW}  The implementation agent hit a context or token limit.{C.RESET}")
+    print(f"  {context}")
+    print()
+    print(f"  {C.GREEN}[f]{C.RESET}  Use codex fallback agent for this task")
+    print(f"  {C.YELLOW}[s]{C.RESET}  Skip this task and continue")
+    print()
+    try:
+        choice = input("  Choice [f/s] (default: f): ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return choice != "s"
+
+
+def _call_agent_with_fallback(
+    agent_name: str,
+    prompt: str,
+    config: dict,
+) -> str:
+    """Call an implementation agent; on token-limit failure, offer codex fallback.
+
+    Wraps ``call_agent()`` with:
+    - stderr / exit-code inspection for token-limit signals
+    - user prompt to roll back and switch to the codex fallback agent
+    """
+    agent_cfg   = config.get("agents", {}).get(agent_name, {})
+    command     = agent_cfg.get("command", agent_name)
+    extra_args  = agent_cfg.get("args", [])
+    model       = agent_cfg.get("model")
+    prompt_mode = agent_cfg.get("prompt_mode", "stdin")
+
+    resolved = shutil.which(command)
+    if resolved:
+        command = resolved
+
+    cmd = [command] + extra_args
+    if model:
+        cmd += ["--model", model]
+
+    info(f"Invoking {agent_cfg.get('command', agent_name)} ({agent_name}) ...")
+    _log(f"AGENT CALL: {agent_name} via {command} (prompt_mode={prompt_mode})")
+
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    (LOGS_DIR / f"{agent_name}_last_prompt.txt").write_text(prompt, encoding="utf-8")
+
+    try:
+        if prompt_mode == "arg":
+            result = run_command(cmd + [prompt], capture=True, timeout=600)
+        else:
+            result = run_command(cmd, capture=True, input_text=prompt, timeout=600)
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"Agent command not found: '{command}'. "
+            f"Edit .ai-pipeline/config.json to configure the '{agent_name}' agent."
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Agent '{agent_name}' timed out after 600 seconds.")
+
+    output = result.stdout or ""
+    stderr = (result.stderr or "").strip()
+    (LOGS_DIR / f"{agent_name}_last_output.txt").write_text(output, encoding="utf-8")
+
+    if result.returncode != 0:
+        warn(f"Agent {agent_name} exited {result.returncode}")
+        _log(f"AGENT STDERR: {stderr[:500]}")
+
+        if is_token_limit_error(output + "\n" + stderr, result.returncode):
+            context_hint = f"Prompt size: {len(prompt):,} chars"
+            use_fallback = notify_fallback_and_get_decision(context_hint)
+            if use_fallback:
+                info("Rolling back any partial file writes ...")
+                rolled = rollback_implementation_files()
+                if rolled:
+                    for f in rolled:
+                        info(f"  Rolled back: {f}")
+                return invoke_codex_fallback(prompt, config)
+            raise RuntimeError(
+                f"Agent {agent_name} hit a token limit — task skipped by user."
+            )
+
+    return output
+
+
+# ─────────────────────────────────────────────────────────────
+# Parallel task execution helpers
+# ─────────────────────────────────────────────────────────────
+
+def _build_task_prompt(task: dict, prompt_file: Path) -> str:
+    """Construct the full prompt for a single task."""
+    base_prompt = prompt_file.read_text(encoding="utf-8")
+    context     = read_context_files(ARCHITECTURE_FILE, DESIGN_FILE, TASKS_FILE)
+    return (
+        f"{base_prompt}\n\n---\n## Current Task\n\n"
+        f"**Task {task['id']}:** {task['description']}\n\n"
+        f"**Dependencies:** {task.get('depends_on') or 'none'}\n\n"
+        f"---\n## Reference Documents\n\n{context}"
+    )
+
+
+def _run_one_task(
+    task: dict,
+    prompt_file: Path,
+    config: dict,
+    task_data: dict,
+    log_lines: list,
+) -> bool:
+    """Execute a single task and update shared state.  Thread-safe.  Returns True on success."""
+    task_id     = task["id"]
+    description = task["description"]
+    agent_cfg   = config.get("agents", {}).get("implementation", {})
+    agent_name  = agent_cfg.get("command", "claude")
+
+    _emit(TaskStarted(
+        task_id=str(task_id),
+        description=description,
+        agent=agent_name,
+        started_at=_now_iso(),
+    ))
+    info(f"  ▸ Task {task_id}: {description}")
+
+    t0 = datetime.now(timezone.utc)
+    try:
+        task_prompt = _build_task_prompt(task, prompt_file)
+        _call_agent_with_fallback("implementation", task_prompt, config)
+
+        duration_ms = int((datetime.now(timezone.utc) - t0).total_seconds() * 1000)
+        _emit(TaskCompleted(
+            task_id=str(task_id),
+            description=description,
+            duration_ms=duration_ms,
+            ended_at=_now_iso(),
+        ))
+        success(f"  ✓ Task {task_id} complete ({duration_ms // 1000}s)")
+
+        with _GRAPH_LOCK:
+            for t in task_data["tasks"]:
+                if t["id"] == task_id:
+                    t["status"]       = "completed"
+                    t["completed_at"] = _now_iso()
+            task_data["completed"] = sum(
+                1 for t in task_data["tasks"] if t.get("status") == "completed"
+            )
+            TASK_GRAPH_FILE.write_text(json.dumps(task_data, indent=2), encoding="utf-8")
+
+        _mark_task_complete_in_md(description)
+        log_lines.append(f"## Task {task_id}: {description}")
+        log_lines.append(f"Status: completed")
+        log_lines.append(f"Completed: {_now_iso()}")
+        log_lines += ["", "---", ""]
+        return True
+
+    except (RuntimeError, subprocess.CalledProcessError) as e:
+        duration_ms = int((datetime.now(timezone.utc) - t0).total_seconds() * 1000)
+        _emit(TaskFailed(
+            task_id=str(task_id),
+            description=description,
+            error=str(e),
+            ended_at=_now_iso(),
+        ))
+        error(f"  ✗ Task {task_id} failed: {e}")
+        _log(f"Task {task_id} failed: {e}")
+        log_lines.append(f"## Task {task_id}: {description}")
+        log_lines.append(f"Status: FAILED")
+        log_lines.append(f"Error: {e}")
+        log_lines += ["", "---", ""]
+        return False
+
+
+def _execute_parallel_groups(
+    task_data: dict,
+    prompt_file: Path,
+    config: dict,
+    log_lines: list,
+) -> None:
+    """Run tasks grouped by parallel_groups, executing each group concurrently."""
+    tasks_by_id = {t["id"]: t for t in task_data["tasks"]}
+    parallel_groups: list[list] = task_data.get("parallel_groups", [])
+
+    # Flatten the groups to a set for fast lookup; tasks not in any group run sequentially.
+    in_group: set = {tid for group in parallel_groups for tid in group}
+    dep_statuses: dict = {t["id"]: t["status"] for t in task_data["tasks"]}
+
+    # Run grouped tasks in parallel, group by group.
+    for group in parallel_groups:
+        runnable = [
+            tasks_by_id[tid]
+            for tid in group
+            if tid in tasks_by_id
+            and tasks_by_id[tid].get("status") == "pending"
+            and not any(dep_statuses.get(d) != "completed"
+                        for d in tasks_by_id[tid].get("depends_on", []))
+        ]
+        if not runnable:
+            continue
+
+        max_workers = min(len(runnable), 4)  # cap at 4 concurrent agents
+        info(f"  Running {len(runnable)} tasks in parallel (max {max_workers} workers) ...")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(_run_one_task, task, prompt_file, config, task_data, log_lines): task
+                for task in runnable
+            }
+            for future in as_completed(futures):
+                task = futures[future]
+                succeeded = future.result()
+                dep_statuses[task["id"]] = "completed" if succeeded else "failed"
+
+    # Run any tasks that were not covered by parallel_groups sequentially.
+    for task in task_data["tasks"]:
+        if task["id"] in in_group or task.get("status") != "pending":
+            continue
+        blocked = [d for d in task.get("depends_on", []) if dep_statuses.get(d) != "completed"]
+        if blocked:
+            warn(f"    Task {task['id']} blocked by {blocked}. Skipping.")
+            continue
+        dep_statuses[task["id"]] = (
+            "completed" if _run_one_task(task, prompt_file, config, task_data, log_lines)
+            else "failed"
+        )
+
+
+# ─────────────────────────────────────────────────────────────
 # Stage 7: Implementation (Claude)
 # ─────────────────────────────────────────────────────────────
 
@@ -1261,57 +1737,28 @@ def run_implementation(state: dict, config: dict) -> None:
     if not prompt_file.exists():
         raise RuntimeError(f"Missing prompt: {prompt_file}")
 
-    log_lines = [
+    log_lines: list[str] = [
         "# Implementation Log",
         f"\nStarted: {datetime.now(timezone.utc).isoformat()}",
         f"Branch: {state.get('branch', 'unknown')}",
         "",
     ]
 
-    dep_statuses = {t["id"]: t["status"] for t in tasks}
-
-    for task in pending:
-        task_id     = task["id"]
-        description = task["description"]
-        deps        = task.get("depends_on", [])
-
-        print(f"{C.BOLD}  Task {task_id}:{C.RESET} {description}")
-
-        blocked = [d for d in deps if dep_statuses.get(d) != "completed"]
-        if blocked:
-            warn(f"    Blocked by tasks: {blocked}. Skipping.")
-            continue
-
-        base_prompt = prompt_file.read_text(encoding="utf-8")
-        context     = read_context_files(ARCHITECTURE_FILE, DESIGN_FILE, TASKS_FILE)
-        task_prompt = (
-            f"{base_prompt}\n\n---\n## Current Task\n\n"
-            f"**Task {task_id}:** {description}\n\n"
-            f"**Dependencies:** {deps or 'none'}\n\n"
-            f"---\n## Reference Documents\n\n{context}"
-        )
-
-        try:
-            call_agent("implementation", task_prompt, config)
-            success(f"    Task {task_id} complete.")
-
-            for t in tasks:
-                if t["id"] == task_id:
-                    t["status"]       = "completed"
-                    t["completed_at"] = datetime.now(timezone.utc).isoformat()
-            dep_statuses[task_id] = "completed"
-            task_data["completed"] = sum(1 for t in tasks if t.get("status") == "completed")
-            TASK_GRAPH_FILE.write_text(json.dumps(task_data, indent=2), encoding="utf-8")
-
-            _mark_task_complete_in_md(description)
-
-            log_lines += [f"## Task {task_id}: {description}", "Status: completed",
-                          f"Completed: {datetime.now(timezone.utc).isoformat()}", "", "---", ""]
-        except Exception as e:
-            error(f"    Task {task_id} failed: {e}")
-            log_lines += [f"## Task {task_id}: {description}",
-                          f"Status: FAILED", f"Error: {e}", "", "---", ""]
-            _log(f"Task {task_id} failed: {e}")
+    parallel_groups = task_data.get("parallel_groups", [])
+    if parallel_groups:
+        info(f"Parallel groups detected ({len(parallel_groups)} groups) — running concurrently.")
+        _execute_parallel_groups(task_data, prompt_file, config, log_lines)
+    else:
+        # No parallel groups — run sequentially via the shared helper.
+        dep_statuses = {t["id"]: t["status"] for t in tasks}
+        for task in pending:
+            blocked = [d for d in task.get("depends_on", [])
+                       if dep_statuses.get(d) != "completed"]
+            if blocked:
+                warn(f"    Task {task['id']} blocked by {blocked}. Skipping.")
+                continue
+            succeeded = _run_one_task(task, prompt_file, config, task_data, log_lines)
+            dep_statuses[task["id"]] = "completed" if succeeded else "failed"
 
     IMPLEMENTATION_LOG_FILE.write_text("\n".join(log_lines), encoding="utf-8")
     success(f"Log → {IMPLEMENTATION_LOG_FILE.relative_to(REPO_ROOT)}")
@@ -1319,12 +1766,13 @@ def run_implementation(state: dict, config: dict) -> None:
 
 
 def _mark_task_complete_in_md(description: str) -> None:
-    if not TASKS_FILE.exists():
-        return
-    content = TASKS_FILE.read_text(encoding="utf-8")
-    snippet = re.escape(description[:60])
-    new = re.sub(r"- \[ \] " + snippet, "- [x] " + description[:60], content, count=1)
-    TASKS_FILE.write_text(new, encoding="utf-8")
+    with _GRAPH_LOCK:
+        if not TASKS_FILE.exists():
+            return
+        content = TASKS_FILE.read_text(encoding="utf-8")
+        snippet = re.escape(description[:60])
+        new = re.sub(r"- \[ \] " + snippet, "- [x] " + description[:60], content, count=1)
+        TASKS_FILE.write_text(new, encoding="utf-8")
 
 # ─────────────────────────────────────────────────────────────
 # Stage 8: Validation
@@ -1458,21 +1906,45 @@ def _install_via_npm(command: str, pkg: str) -> bool:
 
 
 def _install_via_curl(command: str, url: str) -> bool:
-    """Install via a remote shell script. Returns True on success."""
+    """Install via a remote shell script. Returns True on success.
+
+    Downloads the script first, then pipes it to bash — avoids ``shell=True``
+    with a raw URL interpolated into a command string.
+    """
     info(f"{command} — not found, installing via install script ...")
     if not shutil.which("curl"):
         error(f"{command} — curl not found, cannot run install script")
         warn(f"  Manual install: curl -fsSL {url} | bash")
         return False
-    result = run_command(f'curl -fsSL "{url}" | bash', capture=True, timeout=120)
-    if result.returncode == 0:
-        success(f"{command} — installed")
-        return True
-    error(f"{command} — installation failed")
-    warn(f"  Manual install: curl -fsSL {url} | bash")
-    if result.stderr:
-        warn(f"  {result.stderr.strip()[:200]}")
-    return False
+    if not shutil.which("bash"):
+        error(f"{command} — bash not found, cannot run install script")
+        warn(f"  Manual install: curl -fsSL {url} | bash")
+        return False
+    try:
+        fetch = run_command(["curl", "-fsSL", url], capture=True, timeout=30)
+        if fetch.returncode != 0:
+            error(f"{command} — download failed (exit {fetch.returncode})")
+            warn(f"  Manual install: curl -fsSL {url} | bash")
+            return False
+        install = subprocess.run(
+            ["bash", "-s"],
+            input=fetch.stdout,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=90,
+            cwd=str(REPO_ROOT),
+            env={**os.environ},
+        )
+        if install.returncode == 0:
+            success(f"{command} — installed")
+            return True
+        error(f"{command} — installation failed (exit {install.returncode})")
+        warn(f"  Manual install: curl -fsSL {url} | bash")
+        return False
+    except subprocess.TimeoutExpired:
+        error(f"{command} — installation timed out")
+        return False
 
 
 def install_agents(config: dict) -> None:
@@ -1619,7 +2091,18 @@ STAGE_RUNNERS = {
 }
 
 
-def run_pipeline(start_stage: str | None = None, single_stage: bool = False) -> None:
+def run_pipeline(
+    start_stage: str | None = None,
+    single_stage: bool = False,
+    emitter: Emitter | None = None,
+    mode: str = "plain",
+    renderer: Any = None,
+) -> None:
+    global _EMITTER, _RUN_ID, _RENDERER
+    _EMITTER = emitter
+    _RENDERER = renderer
+    _RUN_ID = str(uuid.uuid4())
+
     ensure_config()
     config = load_config()
     state  = load_state()
@@ -1641,7 +2124,7 @@ def run_pipeline(start_stage: str | None = None, single_stage: bool = False) -> 
             sys.exit(1)
         state = set_stage(start_stage, state)
 
-    current = state.get("current_stage", "idle")
+    current = state.get("current_stage") or "idle"
     if current == "idle":
         state   = set_stage("scanning", state)
         current = "scanning"
@@ -1654,25 +2137,42 @@ def run_pipeline(start_stage: str | None = None, single_stage: bool = False) -> 
 
     to_run = [current] if single_stage else STAGES[idx:]
 
+    _emit(RunStarted(run_id=_RUN_ID, started_at=_now_iso(), mode=mode))  # type: ignore[arg-type]
+
+    runnable = [s for s in to_run if s not in ("idle", "done") and STAGE_RUNNERS.get(s)]
+    for i, stage in enumerate(runnable):
+        _emit(StageQueued(stage_id=stage, stage_name=STAGE_LABELS.get(stage, stage), index=i))
+
     for stage in to_run:
         if stage in ("idle", "done"):
             continue
         runner = STAGE_RUNNERS.get(stage)
         if not runner:
             continue
+        started_at = _now_iso()
+        t0 = datetime.now(timezone.utc)
+        _emit(StageStarted(stage_id=stage, started_at=started_at))
         try:
             runner(state, config)
             state = load_state()
+            ended_at = _now_iso()
+            duration_ms = int((datetime.now(timezone.utc) - t0).total_seconds() * 1000)
+            _emit(StageCompleted(stage_id=stage, ended_at=ended_at, duration_ms=duration_ms))
         except RuntimeError as e:
+            ended_at = _now_iso()
+            _emit(StageFailed(stage_id=stage, ended_at=ended_at, error=str(e)))
+            _emit(RunCompleted(run_id=_RUN_ID, ended_at=ended_at, status=RunStatus.FAILED))
             fail_pipeline(state, str(e))
         except KeyboardInterrupt:
             warn("\nInterrupted by user.")
+            _emit(RunCompleted(run_id=_RUN_ID, ended_at=_now_iso(), status=RunStatus.INTERRUPTED))
             sys.exit(0)
 
     state = load_state()
     if state["current_stage"] == "done":
         banner("Pipeline Complete")
         show_status(state)
+        _emit(RunCompleted(run_id=_RUN_ID, ended_at=_now_iso(), status=RunStatus.DONE))
 
 # ─────────────────────────────────────────────────────────────
 # CLI
@@ -1736,10 +2236,10 @@ def main() -> None:
 
     if args.approve:
         APPROVALS_DIR.mkdir(parents=True, exist_ok=True)
-        PLANNING_APPROVED_FLAG.write_text(
-            f"Approved: {datetime.now(timezone.utc).isoformat()}\n", encoding="utf-8"
-        )
+        approved_at = datetime.now(timezone.utc).isoformat()
+        PLANNING_APPROVED_FLAG.write_text(f"Approved: {approved_at}\n", encoding="utf-8")
         success("Planning approved.")
+        _emit(ApprovalReceived(run_id=_RUN_ID, actor="user", at=approved_at))
         state = load_state()
         if state["current_stage"] == "waiting_approval":
             set_stage("implementation", state)
