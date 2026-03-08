@@ -4,6 +4,10 @@ A local multi-agent orchestrator for structured, reproducible AI-assisted develo
 
 Coordinates Gemini, Codex, ChiefLoop, and Claude through deterministic stages — producing planning artifacts before touching any code, and requiring human approval before implementation begins.
 
+<p align="center">
+    <img src="assets/tui-screenshot.png" alt="A.I.N. Pipeline TUI" width="1100" />
+</p>
+
 ---
 
 ## Installation
