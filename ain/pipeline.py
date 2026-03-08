@@ -880,6 +880,119 @@ def _parse_and_write_planning_docs(output: str) -> None:
 # Stage 5: Task Creation (Chief)
 # ─────────────────────────────────────────────────────────────
 
+CHIEF_DIR      = REPO_ROOT / ".chief"
+CHIEF_PRDS_DIR = CHIEF_DIR / "prds" / "main"
+CHIEF_PRD_FILE = CHIEF_PRDS_DIR / "prd.json"
+CHIEF_PRD_MD   = CHIEF_PRDS_DIR / "prd.md"
+
+
+def _write_chief_prd(prompt: str) -> None:
+    """Write .chief/prds/main/prd.json and prd.md from the task-creation prompt."""
+    CHIEF_PRDS_DIR.mkdir(parents=True, exist_ok=True)
+
+    prd_md = (
+        "# Task Creation Context\n\n"
+        "Read the planning documents below and produce two files:\n\n"
+        "- Write `docs/TASKS.md` — a dependency-ordered markdown checkbox task list\n"
+        "- Write `docs/TASK_GRAPH.json` — a JSON dependency graph\n\n"
+        "Write the files directly to disk using your file-editing tools.\n"
+        "Do NOT output file markers or print the content to stdout.\n\n"
+        "---\n\n"
+        + prompt
+    )
+    CHIEF_PRD_MD.write_text(prd_md, encoding="utf-8")
+
+    prd = {
+        "project": REPO_ROOT.name,
+        "description": (
+            "Analyse the planning documents in prd.md and produce "
+            "docs/TASKS.md and docs/TASK_GRAPH.json."
+        ),
+        "userStories": [
+            {
+                "id": "US-001",
+                "title": "Create docs/TASKS.md",
+                "description": (
+                    "As a developer, I need docs/TASKS.md containing a "
+                    "dependency-ordered markdown checkbox task list."
+                ),
+                "acceptanceCriteria": [
+                    "File docs/TASKS.md exists",
+                    "File contains at least one checkbox task in '- [ ] ...' format",
+                ],
+                "priority": 1,
+                "passes": False,
+                "inProgress": False,
+            },
+            {
+                "id": "US-002",
+                "title": "Create docs/TASK_GRAPH.json",
+                "description": (
+                    "As a developer, I need docs/TASK_GRAPH.json containing "
+                    "valid JSON with id, description, depends_on, status, "
+                    "files_affected, and completed_at for every task."
+                ),
+                "acceptanceCriteria": [
+                    "File docs/TASK_GRAPH.json exists",
+                    "File contains valid JSON with a 'tasks' array",
+                ],
+                "priority": 2,
+                "passes": False,
+                "inProgress": False,
+            },
+        ],
+    }
+    CHIEF_PRD_FILE.write_text(json.dumps(prd, indent=2), encoding="utf-8")
+    success(f"Written → {CHIEF_PRD_FILE.relative_to(REPO_ROOT)}")
+    success(f"Written → {CHIEF_PRD_MD.relative_to(REPO_ROOT)}")
+
+
+def _build_task_graph_from_tasks_md() -> None:
+    if not TASKS_FILE.exists():
+        return
+    content = TASKS_FILE.read_text(encoding="utf-8")
+    tasks = []
+    for i, m in enumerate(re.finditer(r"- \[( |x)\] (.+)", content), start=1):
+        tasks.append({
+            "id": i,
+            "description": m.group(2).strip(),
+            "depends_on": [i - 1] if i > 1 else [],
+            "status": "completed" if m.group(1) == "x" else "pending",
+            "files_affected": [],
+            "completed_at": None,
+        })
+    graph = {
+        "tasks": tasks,
+        "parallel_groups": [],
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "total": len(tasks),
+        "completed": sum(1 for t in tasks if t["status"] == "completed"),
+    }
+    TASK_GRAPH_FILE.write_text(json.dumps(graph, indent=2), encoding="utf-8")
+
+
+def _run_chief_tui(config: dict) -> None:
+    """Run chief as an interactive TUI with a real TTY — no stdout capture."""
+    agent_cfg  = config.get("agents", {}).get("task_creation", {})
+    command    = agent_cfg.get("command", "chief")
+    extra_args = agent_cfg.get("args", [])
+
+    resolved = shutil.which(command)
+    if not resolved:
+        raise RuntimeError(
+            f"Agent command not found: '{command}'. "
+            "Ensure chief is installed and on your PATH."
+        )
+
+    cmd = [resolved] + extra_args + ["--no-retry", "main"]
+    _log(f"RUN (TUI): {' '.join(str(c) for c in cmd)}")
+    info("Launching chief — work through the stories, then exit chief when done.")
+
+    result = subprocess.run(cmd, cwd=str(REPO_ROOT), env={**os.environ})
+    if result.returncode != 0:
+        warn(f"chief exited with code {result.returncode}")
+
+
 def run_task_creation(state: dict, config: dict) -> None:
     banner("Stage: Task Creation (Chief)")
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
@@ -888,17 +1001,28 @@ def run_task_creation(state: dict, config: dict) -> None:
     if not prompt_file.exists():
         raise RuntimeError(f"Missing prompt: {prompt_file}")
 
+    agent_cmd = config.get("agents", {}).get("task_creation", {}).get("command", "")
     ctx_files = [f for f in [PRD_FILE, DESIGN_FILE, FEATURE_SPEC_FILE, ARCHITECTURE_FILE] if f.exists()]
 
-    step(1, 2, "Building prompt ...")
-    prompt = build_prompt(prompt_file, *ctx_files)
+    if agent_cmd == "chief":
+        step(1, 3, "Writing chief PRD ...")
+        _write_chief_prd(build_prompt(prompt_file, *ctx_files))
 
-    step(2, 2, "Calling task creation agent ...")
-    output = call_agent("task_creation", prompt, config)
-    if not output.strip():
-        raise RuntimeError("Task creation agent returned empty output.")
+        step(2, 3, "Running chief TUI ...")
+        _run_chief_tui(config)
 
-    _parse_and_write_task_artifacts(output)
+        step(3, 3, "Validating chief output ...")
+        if not TASK_GRAPH_FILE.exists() and not TASKS_FILE.exists():
+            _build_task_graph_from_tasks_md()
+    else:
+        step(1, 2, "Building prompt ...")
+        prompt = build_prompt(prompt_file, *ctx_files)
+
+        step(2, 2, "Calling task creation agent ...")
+        output = call_agent("task_creation", prompt, config)
+        if not output.strip():
+            raise RuntimeError("Task creation agent returned empty output.")
+        _parse_and_write_task_artifacts(output)
 
     if not validate_tasks_file(TASKS_FILE):
         raise RuntimeError("TASKS.md does not contain valid checkbox tasks.")
@@ -1068,6 +1192,8 @@ _CLEAN_DIRS = [
     PIPELINE_DIR / "logs",
     PIPELINE_DIR / "approvals",
     PIPELINE_DIR / "state",
+    # Chief PRD inputs — regenerated each run, clearing prevents stale state
+    REPO_ROOT / ".chief" / "prds",
 ]
 
 

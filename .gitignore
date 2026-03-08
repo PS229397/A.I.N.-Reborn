@@ -49,3 +49,4 @@ docs/VERIFICATION_REPORT.md
 
 # Chief — generated PRD input files (config is kept)
 .chief/prds/
+.chief/
