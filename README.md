@@ -2,7 +2,7 @@
 
 A local multi-agent orchestrator for structured, reproducible AI-assisted development.
 
-Coordinates Gemini, Codex, ChiefLoop, and Claude through deterministic stages — producing planning artifacts before touching any code, and requiring human approval before implementation begins.
+Coordinates Gemini, Codex, Chief, and Claude through deterministic stages — producing planning artifacts before touching any code, and requiring human approval before implementation begins.
 
 ---
 

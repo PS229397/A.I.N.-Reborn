@@ -14,10 +14,10 @@
       "description": "OpenAI Codex for planning — run: codex --version to verify"
     },
     "task_creation": {
-      "command": "chiefloop",
+      "command": "chief",
       "args": [],
       "model": null,
-      "description": "ChiefLoop task orchestration engine — auto-installed by ain init"
+      "description": "Chief autonomous PRD agent — auto-installed by ain init"
     },
     "implementation": {
       "command": "claude",
@@ -25,6 +25,28 @@
       "model": null,
       "description": "Claude Code for implementation with file access"
     }
+  },
+  "agent_teams": {
+    "enabled": false,
+    "max_teammates": 3,
+    "lead_model": "claude-opus-4-6",
+    "teammate_model": "claude-sonnet-4-6",
+    "require_verification": true
+  },
+  "prd_import": {
+    "min_prd_chars": 500,
+    "allowed_extensions": [".md", ".txt", ".pdf"]
+  },
+  "fallback": {
+    "enabled": false,
+    "trigger_on": "token_limit",
+    "notification_timeout_secs": 180,
+    "fallback_agent": "codex",
+    "fallback_prompt_mode": "full_auto",
+    "protected_paths": ["docs/", ".ai-pipeline/", ".git/", "CLAUDE.md", ".claude/"],
+    "stages_with_fallback": ["task_creation", "implementation"],
+    "codex_timeout_secs": 3600,
+    "on_codex_limit": "pause"
   },
   "validation": {
     "auto_detect": true,

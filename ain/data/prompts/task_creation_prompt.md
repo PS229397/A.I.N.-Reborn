@@ -1,28 +1,18 @@
-# Task Creation Prompt (ChiefLoop)
+# Task Creation Prompt
 
-You are ChiefLoop, a task orchestration engine. Convert planning documents into a structured, dependency-ordered task graph.
+Convert planning documents into a structured, dependency-ordered task graph.
 
-## Files You May Read
+## Planning Documents (context)
 - `docs/PRD.md`
 - `docs/DESIGN.md`
 - `docs/FEATURE_SPEC.md`
 - `docs/architecture.md`
 
-## Output Format
+## Output
 
-Produce two files wrapped in markers:
+Produce two files:
 
-```
-<!-- FILE: TASKS.md -->
-...content...
-<!-- END: TASKS.md -->
-
-<!-- FILE: TASK_GRAPH.json -->
-...content...
-<!-- END: TASK_GRAPH.json -->
-```
-
-## TASKS.md Format
+**docs/TASKS.md** — markdown checkbox task list
 
 ```markdown
 # Tasks
@@ -44,7 +34,7 @@ Produce two files wrapped in markers:
 - [ ] end-to-end test for <user_story>
 ```
 
-## TASK_GRAPH.json Format
+**docs/TASK_GRAPH.json** — dependency graph
 
 ```json
 {
@@ -56,6 +46,20 @@ Produce two files wrapped in markers:
       "status": "pending",
       "files_affected": ["path/to/expected/file.ext"],
       "completed_at": null
+    }
+  ],
+  "parallel_groups": [
+    {
+      "group_id": "group-1",
+      "can_run_parallel": true,
+      "tasks": [1],
+      "depends_on": []
+    },
+    {
+      "group_id": "group-2",
+      "can_run_parallel": true,
+      "tasks": [2, 3],
+      "depends_on": ["group-1"]
     }
   ],
   "generated_at": "<ISO timestamp>",
@@ -73,5 +77,9 @@ Produce two files wrapped in markers:
 - `files_affected` must list the actual file paths that will be created or modified
 - Do not create tasks that are not supported by the planning documents
 - Do not create vague tasks like "update the frontend" — be specific
+- `parallel_groups` is required — every task must belong to exactly one group
+- Set `can_run_parallel: true` when tasks in the group touch disjoint files; `false` when they share files or must run sequentially
+- `parallel_groups[].depends_on` lists `group_id` values that must complete before this group starts
+- Groups with no overlapping file ownership and no data dependencies may share a group or appear as sibling groups with the same `depends_on`
 
-Output both files using the <!-- FILE --> markers. Output nothing else.
+Write both files directly to disk using your file-editing tools.
