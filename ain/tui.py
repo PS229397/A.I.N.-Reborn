@@ -117,6 +117,12 @@ class RichRenderer:
         self._running           : bool                      = False
         self._kb_paused         : bool                      = False  # True while TUI is suspended
         self._last_agent_refresh: float                     = 0.0  # throttle agent output redraws
+        self._mode_details      : Dict[str, str]            = {
+            "key": "default",
+            "label": "Default",
+            "summary": "Gemini -> Codex -> Chief -> Claude",
+        }
+        self._cycle_mode_cb     : Any                       = None
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -209,6 +215,12 @@ class RichRenderer:
             self._input_buffer  = ""
         self._refresh()
         return result
+
+    def configure_mode_controls(self, mode_details: Dict[str, str], cycle_callback: Any) -> None:
+        with self._lock:
+            self._mode_details = dict(mode_details)
+            self._cycle_mode_cb = cycle_callback
+        self._refresh()
 
     # ── Tick thread (keeps UPTIME live) ──────────────────────────────────────
 
@@ -333,6 +345,18 @@ class RichRenderer:
                     self._agent_output.clear()
                     self._agent_scroll = 0
                 self._refresh()
+            elif k == "m":
+                callback = self._cycle_mode_cb
+                if callback is None:
+                    return
+                try:
+                    details = callback()
+                except Exception:
+                    return
+                if isinstance(details, dict):
+                    with self._lock:
+                        self._mode_details = dict(details)
+                    self._refresh()
 
     # ── Event handler ─────────────────────────────────────────────────────────
 
@@ -466,7 +490,7 @@ class RichRenderer:
             Layout(name="header",      size=3),
             Layout(name="body"),
             Layout(name="input_panel", size=5),
-            Layout(name="footer",      size=3),
+            Layout(name="footer",      size=4),
         )
         root["body"].split_row(
             Layout(name="deck",  ratio=1),
@@ -618,12 +642,18 @@ class RichRenderer:
             ("F",     freeze_label),
             ("R",     "live"),
             ("C",     "clear agent"),
+            ("M",     "cycle mode"),
         ]
         for i, (key, label) in enumerate(shortcuts):
             if i:
                 t.append("   ")
             t.append(key,          style=f"bold {C_ACCENT}")
             t.append(f"  {label}", style=C_PRIMARY)
+        t.append("\n")
+        t.append("MODE ", style=f"bold {C_ACCENT}")
+        t.append(self._mode_details.get("key", "default"), style=f"bold {C_PRIMARY}")
+        t.append("  |  ", style=C_ACCENT)
+        t.append(self._mode_details.get("summary", ""), style=C_PRIMARY)
         return Panel(t, border_style=C_ACCENT, padding=(0, 1))
 
     # ── Scroll helpers ────────────────────────────────────────────────────────

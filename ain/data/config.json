@@ -3,21 +3,43 @@
     "architecture": {
       "command": "gemini",
       "args": [],
-      "model": null,
+      "model": "gemini-2.5-flash",
       "description": "Gemini for architecture analysis — run: gemini --version to verify"
     },
     "planning": {
       "command": "codex",
       "args": [],
-      "model": null,
+      "model": "gpt-5.1",
       "prompt_mode": "arg",
       "description": "OpenAI Codex for planning — run: codex --version to verify"
+    },
+    "planning_codex": {
+      "command": "codex",
+      "args": [],
+      "model": "gpt-5.1",
+      "prompt_mode": "arg",
+      "description": "OpenAI Codex for planning generation in codex_only mode"
+    },
+    "planning_chief": {
+      "command": "chief",
+      "args": [],
+      "model": "claude-opus-4.1",
+      "description": "Chief planning agent for claude_chief_only mode"
     },
     "task_creation": {
       "command": "chief",
       "args": [],
-      "model": null,
+      "model": "claude-sonnet-4-20250514",
       "description": "Chief autonomous PRD agent — auto-installed by ain init"
+    },
+    "task_creation_codex": {
+      "command": "codex",
+      "args": [
+        "exec"
+      ],
+      "model": "gpt-5-codex",
+      "prompt_mode": "stdin",
+      "description": "OpenAI Codex for task creation in codex_only mode"
     },
     "implementation": {
       "command": "claude",
@@ -25,18 +47,35 @@
         "--allowedTools",
         "Edit,Write,Bash,Read,Glob,Grep"
       ],
-      "model": null,
+      "model": "claude-sonnet-4-20250514",
       "description": "Claude Code for implementation with file access — primary (Codex fallback enabled)"
+    },
+    "implementation_codex": {
+      "command": "codex",
+      "args": [
+        "exec"
+      ],
+      "model": "gpt-5.1-codex-max",
+      "prompt_mode": "stdin",
+      "description": "OpenAI Codex for implementation in codex_only mode"
     },
     "implementation_fallback": {
       "command": "codex",
       "args": [
         "--approval-mode", "full-auto"
       ],
-      "model": null,
+      "model": "gpt-5.1-codex-max",
       "prompt_mode": "arg",
       "description": "Codex in full-auto mode — fallback when Claude hits token limit during implementation"
     }
+  },
+  "pipeline_mode": {
+    "default": "default",
+    "available": [
+      "default",
+      "codex_only",
+      "claude_chief_only"
+    ]
   },
   "validation": {
     "auto_detect": true,

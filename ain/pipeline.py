@@ -24,6 +24,7 @@ Usage (drop-in):
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import platform
@@ -86,6 +87,7 @@ PROMPTS_DIR       = PIPELINE_DIR / "prompts"
 LOGS_DIR          = PIPELINE_DIR / "logs"
 APPROVALS_DIR     = PIPELINE_DIR / "approvals"
 USER_CONTEXT_FILE = PIPELINE_DIR / "user_context.md"
+BRAINSTORM_CONTEXT_FILE = PIPELINE_DIR / "brainstorm_context.md"
 DOCS_DIR      = REPO_ROOT / "docs"
 PIPELINE_LOG  = LOGS_DIR / "pipeline.log"
 
@@ -161,6 +163,36 @@ DESIGN_HEADINGS = [
     "# UI Changes", "# Risks",
 ]
 
+PIPELINE_MODES: dict[str, dict[str, Any]] = {
+    "default": {
+        "label": "Default",
+        "summary": "Gemini -> Codex -> Chief -> Claude",
+        "stages": {
+            "planning_generation": "planning",
+            "task_creation": "task_creation",
+            "implementation": "implementation",
+        },
+    },
+    "codex_only": {
+        "label": "Codex Only",
+        "summary": "Gemini -> Codex -> Codex -> Codex",
+        "stages": {
+            "planning_generation": "planning_codex",
+            "task_creation": "task_creation_codex",
+            "implementation": "implementation_codex",
+        },
+    },
+    "claude_chief_only": {
+        "label": "Claude/Chief Only",
+        "summary": "Gemini -> Chief -> Chief -> Claude",
+        "stages": {
+            "planning_generation": "planning_chief",
+            "task_creation": "task_creation",
+            "implementation": "implementation",
+        },
+    },
+}
+
 # ─────────────────────────────────────────────────────────────
 # Default configuration
 # ─────────────────────────────────────────────────────────────
@@ -168,24 +200,56 @@ DESIGN_HEADINGS = [
 DEFAULT_CONFIG: dict[str, Any] = {
     "agents": {
         "architecture": {
-            "command": "gemini", "args": [], "model": None,
+            "command": "gemini", "args": [], "model": "gemini-2.5-flash",
             "description": "Gemini for architecture analysis",
         },
         "planning": {
-            "command": "codex", "args": [], "model": None,
+            "command": "codex", "args": [], "model": "gpt-5.1",
             "prompt_mode": "arg",
             "description": "Codex for planning and specification",
         },
+        "planning_codex": {
+            "command": "codex", "args": [], "model": "gpt-5.1",
+            "prompt_mode": "arg",
+            "description": "Codex for planning generation in codex_only mode",
+        },
+        "planning_chief": {
+            "command": "chief", "args": [], "model": "claude-opus-4.1",
+            "description": "Chief for planning generation in claude_chief_only mode",
+        },
         "task_creation": {
-            "command": "chief", "args": [], "model": None,
+            "command": "chief", "args": [], "model": "claude-sonnet-4-20250514",
             "description": "Chief task orchestration engine — auto-installed by ain init",
+        },
+        "task_creation_codex": {
+            "command": "codex", "args": ["exec"], "model": "gpt-5-codex",
+            "prompt_mode": "stdin",
+            "description": "Codex for task creation in codex_only mode",
         },
         "implementation": {
             "command": "claude",
             "args": ["--allowedTools", "Edit,Write,Bash,Read,Glob,Grep"],
-            "model": None,
+            "model": "claude-sonnet-4-20250514",
             "description": "Claude Code for implementation with file access",
         },
+        "implementation_codex": {
+            "command": "codex",
+            "args": ["exec"],
+            "model": "gpt-5.1-codex-max",
+            "prompt_mode": "stdin",
+            "description": "Codex for implementation in codex_only mode",
+        },
+        "implementation_fallback": {
+            "command": "codex",
+            "args": ["--approval-mode", "full-auto"],
+            "model": "gpt-5.1-codex-max",
+            "prompt_mode": "arg",
+            "description": "Codex fallback when default implementation hits token limits",
+        },
+    },
+    "pipeline_mode": {
+        "default": "default",
+        "available": ["default", "codex_only", "claude_chief_only"],
     },
     "validation": {"auto_detect": True, "commands": []},
     "git": {"auto_branch": True, "auto_commit": False, "branch_prefix": "ai/feature"},
@@ -341,14 +405,56 @@ def _log(message: str, *, stage_id: str | None = None) -> None:
 # State management
 # ─────────────────────────────────────────────────────────────
 
-def load_state() -> dict[str, Any]:
-    if STATE_FILE.exists():
-        with open(STATE_FILE, encoding="utf-8") as f:
-            return json.load(f)
+def _default_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    selected_mode = (
+        ((config or {}).get("pipeline_mode") or {}).get("default")
+        or "default"
+    )
     return {
         "current_stage": "idle", "branch": None,
         "started_at": None, "last_updated": None, "completed_stages": [],
+        "fallback_mode": {},
+        "last_safe_stage": "idle",
+        "last_attempted_stage": None,
+        "pause_reason": None,
+        "pause_details": None,
+        "resume_hint": None,
+        "checkpoint_version": 1,
+        "notification_channel": {},
+        "selected_mode": selected_mode,
+        "mode_changed_at": None,
     }
+
+
+def load_state_with_backfill(
+    state: dict[str, Any],
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    merged = _default_state(config)
+    merged.update(state)
+    if merged.get("completed_stages") is None:
+        merged["completed_stages"] = []
+    if merged.get("fallback_mode") is None:
+        merged["fallback_mode"] = {}
+    if merged.get("notification_channel") is None:
+        merged["notification_channel"] = {}
+    selected_mode = get_selected_mode(merged, config or DEFAULT_CONFIG, emit_warning=False)
+    merged["selected_mode"] = selected_mode
+    if "mode_changed_at" not in merged:
+        merged["mode_changed_at"] = None
+    return merged
+
+
+def load_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    current_config = config or load_config()
+    if STATE_FILE.exists():
+        with open(STATE_FILE, encoding="utf-8") as f:
+            raw = json.load(f)
+        state = load_state_with_backfill(raw, current_config)
+        if state != raw:
+            save_state(state)
+        return state
+    return _default_state(current_config)
 
 
 def save_state(state: dict[str, Any]) -> None:
@@ -389,7 +495,7 @@ def fail_pipeline(state: dict[str, Any], reason: str) -> None:
 # ─────────────────────────────────────────────────────────────
 
 def _deep_merge(base: dict, override: dict) -> dict:
-    result = dict(base)
+    result = copy.deepcopy(base)
     for k, v in override.items():
         if k in result and isinstance(result[k], dict) and isinstance(v, dict):
             result[k] = _deep_merge(result[k], v)
@@ -398,11 +504,21 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
+def save_config(config: dict[str, Any]) -> None:
+    PIPELINE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+
+
 def load_config() -> dict[str, Any]:
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE, encoding="utf-8") as f:
-            return _deep_merge(DEFAULT_CONFIG, json.load(f))
-    return DEFAULT_CONFIG
+            raw = json.load(f)
+        config = _deep_merge(DEFAULT_CONFIG, raw)
+        if config != raw:
+            save_config(config)
+        return config
+    return copy.deepcopy(DEFAULT_CONFIG)
 
 
 def ensure_config() -> None:
@@ -411,6 +527,125 @@ def ensure_config() -> None:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(DEFAULT_CONFIG, f, indent=2)
         info(f"Created default config: {CONFIG_FILE.relative_to(REPO_ROOT)}")
+
+
+def get_available_pipeline_modes(config: dict[str, Any]) -> list[str]:
+    configured = (
+        ((config.get("pipeline_mode") or {}).get("available"))
+        or list(PIPELINE_MODES.keys())
+    )
+    available = [mode for mode in configured if mode in PIPELINE_MODES]
+    return available or ["default"]
+
+
+def get_selected_mode(
+    state: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    emit_warning: bool = True,
+) -> str:
+    available = get_available_pipeline_modes(config)
+    selected = (
+        state.get("selected_mode")
+        or ((config.get("pipeline_mode") or {}).get("default"))
+        or "default"
+    )
+    if selected not in PIPELINE_MODES or selected not in available:
+        if emit_warning:
+            warn(f"Invalid stored pipeline mode '{selected}'. Falling back to default.")
+        return "default"
+    return selected
+
+
+def get_mode_details(mode: str) -> dict[str, str]:
+    meta = PIPELINE_MODES[mode]
+    return {
+        "key": mode,
+        "label": meta["label"],
+        "summary": meta["summary"],
+    }
+
+
+def resolve_stage_agent_key(stage_name: str, state: dict[str, Any], config: dict[str, Any]) -> str:
+    mode = get_selected_mode(state, config)
+    agent_key = PIPELINE_MODES[mode]["stages"].get(stage_name)
+    if not agent_key:
+        raise RuntimeError(f"No agent mapping defined for stage '{stage_name}' in mode '{mode}'.")
+    if agent_key not in config.get("agents", {}):
+        raise RuntimeError(
+            f"Resolved agent '{agent_key}' for stage '{stage_name}' is missing from .ai-pipeline/config.json."
+        )
+    return agent_key
+
+
+def resolve_agent_config(stage_name: str, state: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    return config.get("agents", {}).get(resolve_stage_agent_key(stage_name, state, config), {})
+
+
+def set_pipeline_mode(mode: str, state: dict[str, Any], config: dict[str, Any]) -> None:
+    available = get_available_pipeline_modes(config)
+    if mode not in PIPELINE_MODES or mode not in available:
+        raise RuntimeError(f"Unsupported pipeline mode '{mode}'.")
+    current_stage = state.get("current_stage", "idle")
+    if state.get("selected_mode") == mode:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    state["selected_mode"] = mode
+    state["mode_changed_at"] = now
+    config.setdefault("pipeline_mode", {})
+    config["pipeline_mode"]["default"] = mode
+    save_state(state)
+    save_config(config)
+    details = get_mode_details(mode)
+    if current_stage in {"scanning", "architecture", "planning_generation", "task_creation", "implementation", "validation"}:
+        info(
+            f"Pipeline mode changed to {details['label']} ({details['summary']}). "
+            "The new mode will be used starting with the next stage."
+        )
+    else:
+        info(f"Pipeline mode changed to {details['label']} ({details['summary']}).")
+
+
+def cycle_pipeline_mode(state: dict[str, Any], config: dict[str, Any]) -> dict[str, str]:
+    available = get_available_pipeline_modes(config)
+    current = get_selected_mode(state, config)
+    idx = available.index(current)
+    next_mode = available[(idx + 1) % len(available)]
+    try:
+        set_pipeline_mode(next_mode, state, config)
+        return get_mode_details(next_mode)
+    except RuntimeError as exc:
+        warn(str(exc))
+        return get_mode_details(current)
+
+
+def prompt_for_pipeline_mode(state: dict[str, Any], config: dict[str, Any]) -> str:
+    available = get_available_pipeline_modes(config)
+    current = get_selected_mode(state, config)
+
+    print()
+    print("  Select pipeline mode:")
+    for index, mode in enumerate(available, start=1):
+        details = get_mode_details(mode)
+        marker = " (current)" if mode == current else ""
+        print(f"    {index}. {details['label']} [{mode}] - {details['summary']}{marker}")
+    print(f"  Press Enter to keep {current}.")
+
+    try:
+        choice = input("  Mode: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return current
+
+    if not choice:
+        return current
+    if choice.isdigit():
+        idx = int(choice) - 1
+        if 0 <= idx < len(available):
+            return available[idx]
+    if choice in available:
+        return choice
+    warn(f"Unknown mode '{choice}'. Keeping {current}.")
+    return current
 
 # ─────────────────────────────────────────────────────────────
 # Command runner
@@ -503,6 +738,23 @@ def call_agent(agent_name: str, prompt: str, config: dict) -> str:
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Agent '{agent_name}' timed out after 600 seconds.")
+
+
+def _resolve_agent_command(agent_name: str, config: dict[str, Any]) -> list[str]:
+    agent_cfg = config.get("agents", {}).get(agent_name, {})
+    command = agent_cfg.get("command", agent_name)
+    resolved = shutil.which(command)
+    if resolved:
+        command = resolved
+    cmd = [command] + agent_cfg.get("args", [])
+    if agent_cfg.get("model"):
+        cmd += ["--model", agent_cfg["model"]]
+    return cmd
+
+
+def _agent_display_name(agent_name: str, config: dict[str, Any]) -> str:
+    command = (config.get("agents", {}).get(agent_name) or {}).get("command", agent_name)
+    return str(command).capitalize()
 
 
 def _kill_tree(p: subprocess.Popen) -> None:
@@ -1162,15 +1414,14 @@ def run_planning_questions(state: dict, config: dict) -> None:
     user_ctx = USER_CONTEXT_FILE.read_text(encoding="utf-8") if USER_CONTEXT_FILE.exists() else ""
     arch_ctx = ARCHITECTURE_FILE.read_text(encoding="utf-8") if ARCHITECTURE_FILE.exists() else ""
 
-    brainstorm_context = PIPELINE_DIR / "brainstorm_context.md"
-    brainstorm_context.write_text(
+    BRAINSTORM_CONTEXT_FILE.write_text(
         f"# Brainstorm Context\n\n## Feature Request\n\n{user_ctx}\n\n"
         f"## Architecture Overview\n\n{arch_ctx[:4000]}\n",
         encoding="utf-8",
     )
 
     codex_cmd = shutil.which("codex") or "codex"
-    ctx_path  = str(brainstorm_context).replace("\\", "/")
+    ctx_path  = str(BRAINSTORM_CONTEXT_FILE).replace("\\", "/")
     out_path  = str(OPEN_QUESTIONS_FILE).replace("\\", "/")
     brainstorm_prompt = (
         f"Read {ctx_path} to understand the feature request and the existing codebase. "
@@ -1179,7 +1430,7 @@ def run_planning_questions(state: dict, config: dict) -> None:
     )
 
     info("Suspending TUI — starting Codex brainstorm session ...")
-    info(f"Context: {brainstorm_context.relative_to(REPO_ROOT)}")
+    info(f"Context: {BRAINSTORM_CONTEXT_FILE.relative_to(REPO_ROOT)}")
     info(f"Codex will auto-close once it writes {OPEN_QUESTIONS_FILE.name}.")
 
     if _RENDERER is not None:
@@ -1228,59 +1479,74 @@ def run_planning_questions(state: dict, config: dict) -> None:
 # Stage 4: Planning Generation (Codex)
 # ─────────────────────────────────────────────────────────────
 
-def run_planning_generation(state: dict, config: dict) -> None:
-    banner("Stage: Planning — Generation")
-    DOCS_DIR.mkdir(parents=True, exist_ok=True)
-
-    prompt_file = PROMPTS_DIR / "planning_generation_prompt.md"
-    ctx_files   = [
-        f for f in [
-            OPEN_QUESTIONS_FILE, OPEN_ANSWERS_FILE,
-            ARCHITECTURE_FILE, USER_CONTEXT_FILE,
-        ] if f.exists()
-    ]
-    prompt = build_prompt(prompt_file, *ctx_files)
-
-    # ── Primary: Codex suspended (needs real TTY), auto-closes when files appear ──
-    codex_bin = shutil.which("codex") or "codex"
-    _plan_docs = [PRD_FILE, DESIGN_FILE, FEATURE_SPEC_FILE]
-    planning_ok = False
-
-    # Clear stale docs so the watcher doesn't trigger immediately.
-    for _f in _plan_docs:
-        if _f.exists():
-            _f.unlink()
-
-    # Inline prompt for Codex as a CLI arg (no file markers — Codex writes directly).
-    codex_plan_prompt = (
-        f"Read .ai-pipeline/user_context.md, docs/OPEN_QUESTIONS.md, "
-        f"and docs/architecture.md to understand the feature request. "
-        f"Write three planning documents directly to disk — do NOT print them, write the files: "
-        f"docs/PRD.md (headings: # Problem, # Goals, # Non Goals, # User Stories, # Success Criteria), "
-        f"docs/DESIGN.md (headings: # Architecture Changes, # Data Model, # API Changes, # UI Changes, # Risks), "
-        f"docs/FEATURE_SPEC.md (detailed technical spec). "
-        f"Do not ask questions — generate all three files now."
+def _planning_direct_write_prompt() -> str:
+    return (
+        "Read .ai-pipeline/user_context.md, docs/OPEN_QUESTIONS.md, and docs/architecture.md "
+        "to understand the feature request. Write three planning documents directly to disk — "
+        "do NOT print them, write the files: docs/PRD.md (headings: # Problem, # Goals, "
+        "# Non Goals, # User Stories, # Success Criteria), docs/DESIGN.md (headings: "
+        "# Architecture Changes, # Data Model, # API Changes, # UI Changes, # Risks), "
+        "docs/FEATURE_SPEC.md (detailed technical spec). Do not ask questions — generate all "
+        "three files now."
     )
 
-    info("Suspending TUI — running Codex for planning generation ...")
+
+def _write_chief_planning_package(prompt: str) -> None:
+    CHIEF_PRDS_DIR.mkdir(parents=True, exist_ok=True)
+    prd_md = (
+        "# Planning Generation Context\n\n"
+        "Create the planning package for this feature.\n\n"
+        "- Write `docs/PRD.md`\n"
+        "- Write `docs/DESIGN.md`\n"
+        "- Write `docs/FEATURE_SPEC.md`\n\n"
+        "Write the files directly to disk. Do NOT output file markers or print the file contents.\n\n"
+        "---\n\n"
+        f"{prompt}\n\n---\n\n{_planning_direct_write_prompt()}\n"
+    )
+    CHIEF_PRD_MD.write_text(prd_md, encoding="utf-8")
+    CHIEF_PRD_FILE.write_text(
+        json.dumps(
+            {
+                "project": REPO_ROOT.name,
+                "description": "Generate PRD, DESIGN, and FEATURE_SPEC planning docs.",
+                "userStories": [
+                    {"id": "PLAN-001", "title": "Create docs/PRD.md", "passes": False, "inProgress": False},
+                    {"id": "PLAN-002", "title": "Create docs/DESIGN.md", "passes": False, "inProgress": False},
+                    {"id": "PLAN-003", "title": "Create docs/FEATURE_SPEC.md", "passes": False, "inProgress": False},
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _clear_plan_docs() -> list[Path]:
+    plan_docs = [PRD_FILE, DESIGN_FILE, FEATURE_SPEC_FILE]
+    for doc in plan_docs:
+        if doc.exists():
+            doc.unlink()
+    return plan_docs
+
+
+def _watch_for_files(proc: subprocess.Popen, files: list[Path], *, interval: int = 2) -> None:
+    while proc.poll() is None:
+        if all(f.exists() and f.stat().st_size > 0 for f in files):
+            time.sleep(interval)
+            _kill_tree(proc)
+            return
+        time.sleep(interval)
+
+
+def _run_suspended_agent(cmd: list[str], title: str, watch_files: list[Path]) -> bool:
     if _RENDERER is not None:
         _RENDERER.suspend()
     try:
         sys.stdout.write("\033[?25h\033[0m\033[2J\033[H")
         sys.stdout.flush()
-        print("\033[1;96m  ── Planning Generation (Codex) ──\033[0m\n")
-
-        proc = subprocess.Popen([codex_bin, codex_plan_prompt], cwd=str(REPO_ROOT))
-
-        def _watch_planning() -> None:
-            while proc.poll() is None:
-                if all(f.exists() and f.stat().st_size > 0 for f in _plan_docs):
-                    time.sleep(2)
-                    _kill_tree(proc)
-                    return
-                time.sleep(2)
-        threading.Thread(target=_watch_planning, daemon=True).start()
-
+        print(f"\033[1;96m  ── {title} ──\033[0m\n")
+        proc = subprocess.Popen(cmd, cwd=str(REPO_ROOT))
+        threading.Thread(target=_watch_for_files, args=(proc, watch_files), daemon=True).start()
         proc.wait()
     finally:
         sys.stdout.write("\033[?1049l\033[?25h\033[0m\r\n")
@@ -1288,25 +1554,97 @@ def run_planning_generation(state: dict, config: dict) -> None:
         time.sleep(0.5)
         if _RENDERER is not None:
             _RENDERER.resume()
+    return all(f.exists() and f.stat().st_size > 0 for f in watch_files)
 
-    if all(f.exists() and f.stat().st_size > 0 for f in _plan_docs):
-        planning_ok = True
 
-    # ── Fallback: claude --print, output in AGENT.OUTPUT panel ──────────────────
-    if not planning_ok:
-        warn("Codex did not write all planning docs. Falling back to claude --print ...")
-        claude_bin = shutil.which("claude")
-        if claude_bin:
-            _, output = _run_agent_background(
-                [claude_bin, "--print"],
-                agent_name="Claude (planning)",
-                log_slug="planning_generation_claude",
-                input_text=prompt,
-            )
-            if output.strip() and re.search(r"<!--\s*FILE:", output):
-                _parse_and_write_task_artifacts(output)
-        else:
-            warn("claude not found — no further fallback available.")
+def _run_planning_in_background(agent_key: str, prompt: str, config: dict[str, Any]) -> bool:
+    info(f"Running {_agent_display_name(agent_key, config)} for planning generation in background ...")
+    cmd = _resolve_agent_command(agent_key, config)
+    agent_cfg = (config.get("agents", {}).get(agent_key) or {})
+    command_name = str(agent_cfg.get("command", agent_key)).lower()
+    prompt_mode = agent_cfg.get("prompt_mode", "arg")
+
+    # `codex` without `exec` opens its own interactive UI, which steals the terminal.
+    # For planning we always want a non-interactive background run that streams into AIN.
+    if "codex" in command_name and "exec" not in cmd[1:]:
+        cmd = [cmd[0], "exec", *cmd[1:]]
+        prompt_mode = "stdin"
+
+    if prompt_mode == "arg":
+        cmd = cmd + [prompt]
+        rc, output = _run_agent_background(
+            cmd,
+            agent_name=f"{_agent_display_name(agent_key, config)} (planning)",
+            log_slug="planning_generation",
+        )
+    else:
+        rc, output = _run_agent_background(
+            cmd,
+            agent_name=f"{_agent_display_name(agent_key, config)} (planning)",
+            log_slug="planning_generation",
+            input_text=prompt,
+        )
+    if output.strip():
+        _parse_and_write_planning_docs(output)
+    return rc == 0 and all(
+        doc.exists() and doc.stat().st_size > 0
+        for doc in [PRD_FILE, DESIGN_FILE, FEATURE_SPEC_FILE]
+    )
+
+
+def _run_planning_with_chief(prompt: str, config: dict[str, Any]) -> bool:
+    _write_chief_planning_package(prompt)
+    plan_docs = _clear_plan_docs()
+    cmd = _resolve_agent_command("planning_chief", config) + ["--no-retry", "main"]
+    info("Suspending TUI — running Chief for planning generation ...")
+    return _run_suspended_agent(cmd, "Planning Generation (Chief)", plan_docs)
+
+
+def _run_planning_fallback_claude(prompt: str) -> None:
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        warn("claude not found — no further planning fallback available.")
+        return
+    _, output = _run_agent_background(
+        [claude_bin, "--print"],
+        agent_name="Claude (planning)",
+        log_slug="planning_generation_claude",
+        input_text=prompt,
+    )
+    if output.strip():
+        _parse_and_write_planning_docs(output)
+
+
+def run_planning_generation(state: dict, config: dict) -> None:
+    mode = get_selected_mode(state, config)
+    agent_key = resolve_stage_agent_key("planning_generation", state, config)
+    banner(f"Stage: Planning — Generation [mode={mode} agent={agent_key}]")
+    DOCS_DIR.mkdir(parents=True, exist_ok=True)
+
+    prompt_file = PROMPTS_DIR / "planning_generation_prompt.md"
+    ctx_files = [
+        f for f in [
+            OPEN_QUESTIONS_FILE, OPEN_ANSWERS_FILE,
+            ARCHITECTURE_FILE, USER_CONTEXT_FILE,
+        ] if f.exists()
+    ]
+    prompt = build_prompt(prompt_file, *ctx_files)
+    planning_prompt = f"{prompt}\n\n---\n\n{_planning_direct_write_prompt()}"
+    _clear_plan_docs()
+
+    planning_ok = False
+    if mode in ("default", "codex_only"):
+        planning_ok = _run_planning_in_background(agent_key, planning_prompt, config)
+        if not planning_ok:
+            warn("Primary planning agent did not write all planning docs. Falling back to claude --print ...")
+            _run_planning_fallback_claude(prompt)
+    elif mode == "claude_chief_only":
+        planning_ok = _run_planning_with_chief(prompt, config)
+        if not planning_ok:
+            warn("Chief did not write all planning docs. Falling back to claude --print ...")
+            _run_planning_fallback_claude(prompt)
+    else:
+        raise RuntimeError(f"Unsupported planning mode '{mode}'.")
 
     # ── Write stubs for any still-missing files ─────────────────────────────────
     for doc, headings, name in [
@@ -1501,8 +1839,29 @@ def _run_chief_background(config: dict) -> tuple[bool, str]:
     return True, output
 
 
+def _persist_stage_fallback(
+    stage_name: str,
+    state: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    command: str = "codex",
+    args: list[str] | None = None,
+    prompt_mode: str = "stdin",
+) -> None:
+    state.setdefault("fallback_mode", {})
+    state["fallback_mode"][stage_name] = command
+    config.setdefault("agents", {}).setdefault(stage_name, {})
+    config["agents"][stage_name]["command"] = command
+    config["agents"][stage_name]["args"] = args or ["exec"]
+    config["agents"][stage_name]["prompt_mode"] = prompt_mode
+    save_state(state)
+    save_config(config)
+
+
 def run_task_creation(state: dict, config: dict) -> None:
-    banner("Stage: Task Creation")
+    mode = get_selected_mode(state, config)
+    agent_key = resolve_stage_agent_key("task_creation", state, config)
+    banner(f"Stage: Task Creation [mode={mode} agent={agent_key}]")
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
     prompt_file = PROMPTS_DIR / "task_creation_prompt.md"
@@ -1512,87 +1871,84 @@ def run_task_creation(state: dict, config: dict) -> None:
     ctx_files = [f for f in [PRD_FILE, DESIGN_FILE, FEATURE_SPEC_FILE, ARCHITECTURE_FILE] if f.exists()]
     prompt    = build_prompt(prompt_file, *ctx_files)
 
-    chief_cmd = shutil.which("chief")
-
-    if chief_cmd:
-        step(1, 2, "Writing chief PRD ...")
-        _write_chief_prd(prompt)
-
-        # Clear stale task artifacts so the watcher doesn't fire immediately.
-        for _stale in [TASKS_FILE, TASK_GRAPH_FILE]:
-            if _stale.exists():
-                _stale.unlink()
-
-        step(2, 2, "Running chief (suspending TUI) — will auto-start and auto-close ...")
-
-        if _RENDERER is not None:
-            _RENDERER.suspend()
-        try:
-            sys.stdout.write("\033[?25h\033[0m\033[2J\033[H")
-            sys.stdout.flush()
-            print("\033[1;96m  ── Chief Task Creation ──\033[0m")
-            print("\033[96m  Chief is starting — auto-pressing 's' in a moment.\033[0m\n")
-
-            proc = subprocess.Popen([chief_cmd, "--no-retry", "main"], cwd=str(REPO_ROOT))
-
-            # Auto-press 's' — chief is in the current terminal so SendKeys
-            # targets this window directly, no AppActivate needed.
-            def _send_s() -> None:
-                time.sleep(3)
-                if proc.poll() is None:
-                    subprocess.run(
-                        ["powershell", "-NoProfile", "-Command",
-                         "$s = New-Object -ComObject WScript.Shell; $s.SendKeys('s')"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    )
-            threading.Thread(target=_send_s, daemon=True).start()
-
-            # Auto-close chief once TASKS.md is written.
-            def _watch_chief() -> None:
-                while proc.poll() is None:
-                    if validate_tasks_file(TASKS_FILE):
-                        time.sleep(2)
-                        _kill_tree(proc)
-                        return
-                    time.sleep(2)
-            threading.Thread(target=_watch_chief, daemon=True).start()
-
-            proc.wait()
-        finally:
-            # Chief's TUI may have left the terminal in alternate-screen mode
-            # with the cursor hidden. Hard-reset before Rich takes it back.
-            sys.stdout.write("\033[?1049l\033[?25h\033[0m\r\n")
-            sys.stdout.flush()
-            time.sleep(0.5)   # let the terminal settle
-            if _RENDERER is not None:
-                _RENDERER.resume()
-
-        # Emit TASKS.md content into AGENT.OUTPUT so it's visible.
-        if validate_tasks_file(TASKS_FILE):
-            for line in TASKS_FILE.read_text(encoding="utf-8").splitlines():
-                if line.strip():
-                    _emit(AgentOutput(ts=_now_iso(), line=line, agent="Chief"))
-
-    # Validate chief output — fall back to Codex if TASKS.md is missing or invalid.
-    if not validate_tasks_file(TASKS_FILE):
-        if chief_cmd:
-            warn("Chief did not produce a valid TASKS.md. Falling back to Codex ...")
-        else:
-            info("Chief not found. Running Codex for task creation ...")
-
-        codex_bin = shutil.which("codex") or "codex"
-        _, output = _run_agent_background(
-            [codex_bin],
-            agent_name="Codex (task creation)",
-            log_slug="task_creation_codex",
-            input_text=prompt,
-        )
+    if mode == "codex_only":
+        output = call_agent(agent_key, prompt, config)
         if not output.strip():
             raise RuntimeError("Codex task creation returned empty output.")
         _parse_and_write_task_artifacts(output)
-
         if not TASKS_FILE.exists():
             TASKS_FILE.write_text(output, encoding="utf-8")
+    else:
+        chief_cfg = config.get("agents", {}).get(agent_key, {})
+        chief_cmd_name = chief_cfg.get("command", "chief")
+        chief_cmd = shutil.which(chief_cmd_name)
+
+        if chief_cmd:
+            step(1, 2, "Writing chief PRD ...")
+            _write_chief_prd(prompt)
+
+            for _stale in [TASKS_FILE, TASK_GRAPH_FILE]:
+                if _stale.exists():
+                    _stale.unlink()
+
+            step(2, 2, "Running chief (suspending TUI) — will auto-start and auto-close ...")
+
+            if _RENDERER is not None:
+                _RENDERER.suspend()
+            try:
+                sys.stdout.write("\033[?25h\033[0m\033[2J\033[H")
+                sys.stdout.flush()
+                print("\033[1;96m  ── Chief Task Creation ──\033[0m")
+                print("\033[96m  Chief is starting — auto-pressing 's' in a moment.\033[0m\n")
+
+                proc = subprocess.Popen([chief_cmd] + chief_cfg.get("args", []) + ["--no-retry", "main"], cwd=str(REPO_ROOT))
+
+                def _send_s() -> None:
+                    time.sleep(3)
+                    if proc.poll() is None:
+                        subprocess.run(
+                            ["powershell", "-NoProfile", "-Command",
+                             "$s = New-Object -ComObject WScript.Shell; $s.SendKeys('s')"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        )
+                threading.Thread(target=_send_s, daemon=True).start()
+
+                def _watch_chief() -> None:
+                    while proc.poll() is None:
+                        if validate_tasks_file(TASKS_FILE):
+                            time.sleep(2)
+                            _kill_tree(proc)
+                            return
+                        time.sleep(2)
+                threading.Thread(target=_watch_chief, daemon=True).start()
+
+                proc.wait()
+            finally:
+                sys.stdout.write("\033[?1049l\033[?25h\033[0m\r\n")
+                sys.stdout.flush()
+                time.sleep(0.5)
+                if _RENDERER is not None:
+                    _RENDERER.resume()
+
+            if validate_tasks_file(TASKS_FILE):
+                for line in TASKS_FILE.read_text(encoding="utf-8").splitlines():
+                    if line.strip():
+                        _emit(AgentOutput(ts=_now_iso(), line=line, agent="Chief"))
+
+        if not validate_tasks_file(TASKS_FILE):
+            if mode == "claude_chief_only":
+                raise RuntimeError("Chief did not produce a valid TASKS.md in claude_chief_only mode.")
+            if chief_cmd:
+                warn("Chief did not produce a valid TASKS.md. Falling back to Codex ...")
+            else:
+                info("Chief not found. Running Codex for task creation ...")
+            _persist_stage_fallback("task_creation", state, config)
+            output = call_agent("task_creation_codex", prompt, config)
+            if not output.strip():
+                raise RuntimeError("Codex task creation returned empty output.")
+            _parse_and_write_task_artifacts(output)
+            if not TASKS_FILE.exists():
+                TASKS_FILE.write_text(output, encoding="utf-8")
 
     if TASKS_FILE.exists() and not TASK_GRAPH_FILE.exists():
         _build_task_graph_from_tasks_md()
@@ -1661,6 +2017,7 @@ def run_waiting_approval(state: dict, config: dict) -> None:
         return
 
     _emit(AwaitingApproval(run_id=_RUN_ID, stage_id="waiting_approval"))
+    info("Task creation completed. Pipeline is paused at the approval gate, not crashed.")
 
     print(f"\n{C.BOLD}{C.YELLOW}  APPROVAL REQUIRED{C.RESET}")
     print()
@@ -1724,34 +2081,31 @@ def commit_implementation(state: dict, config: dict) -> None:
 # Workspace cleanup
 # ─────────────────────────────────────────────────────────────
 
-# Generated files that belong to a single pipeline run, not the tool itself.
-_CLEAN_FILES = [
-    # Planning & architecture docs
-    DOCS_DIR / "architecture.md",
-    DOCS_DIR / "PRD.md",
-    DOCS_DIR / "DESIGN.md",
-    DOCS_DIR / "FEATURE_SPEC.md",
-    DOCS_DIR / "OPEN_QUESTIONS.md",
-    DOCS_DIR / "OPEN_ANSWERS.md",
-    # Task artifacts
-    DOCS_DIR / "TASKS.md",
-    DOCS_DIR / "TASK_GRAPH.json",
-    # Run logs & reports
-    DOCS_DIR / "IMPLEMENTATION_LOG.md",
-    DOCS_DIR / "VERIFICATION_REPORT.md",
-    # Pipeline session files
-    PIPELINE_DIR / "user_context.md",
-    PIPELINE_DIR / "brainstorm_context.md",
-]
+def _clean_files() -> list[Path]:
+    return [
+        DOCS_DIR / "architecture.md",
+        DOCS_DIR / "PRD.md",
+        DOCS_DIR / "DESIGN.md",
+        DOCS_DIR / "FEATURE_SPEC.md",
+        DOCS_DIR / "OPEN_QUESTIONS.md",
+        DOCS_DIR / "OPEN_ANSWERS.md",
+        DOCS_DIR / "TASKS.md",
+        DOCS_DIR / "TASK_GRAPH.json",
+        DOCS_DIR / "IMPLEMENTATION_LOG.md",
+        DOCS_DIR / "VERIFICATION_REPORT.md",
+        USER_CONTEXT_FILE,
+        BRAINSTORM_CONTEXT_FILE,
+    ]
 
-_CLEAN_DIRS = [
-    PIPELINE_DIR / "scan",
-    PIPELINE_DIR / "logs",
-    PIPELINE_DIR / "approvals",
-    PIPELINE_DIR / "state",
-    # Chief PRD inputs — regenerated each run, clearing prevents stale state
-    REPO_ROOT / ".chief" / "prds",
-]
+
+def _clean_dirs() -> list[Path]:
+    return [
+        SCAN_DIR,
+        LOGS_DIR,
+        APPROVALS_DIR,
+        PIPELINE_DIR / "state",
+        REPO_ROOT / ".chief" / "prds",
+    ]
 
 
 def clean_workspace(silent: bool = False) -> None:
@@ -1762,24 +2116,18 @@ def clean_workspace(silent: bool = False) -> None:
     """
     removed: list[str] = []
 
-    for f in _CLEAN_FILES:
+    for f in _clean_files():
         if f.exists():
             f.unlink()
             removed.append(str(f.relative_to(REPO_ROOT)))
 
-    for d in _CLEAN_DIRS:
+    for d in _clean_dirs():
         if d.exists():
             shutil.rmtree(d)
             removed.append(str(d.relative_to(REPO_ROOT)) + "/")
 
     # Reset state to idle (keeps config intact)
-    save_state({
-        "current_stage": "idle",
-        "branch": None,
-        "started_at": None,
-        "last_updated": None,
-        "completed_stages": [],
-    })
+    save_state(_default_state(load_config()))
 
     if not silent:
         if removed:
@@ -1860,6 +2208,7 @@ def notify_fallback_and_get_decision(context: str, timeout_secs: int = 30) -> bo
 def _call_agent_with_fallback(
     agent_name: str,
     prompt: str,
+    state: dict[str, Any],
     config: dict,
 ) -> str:
     """Call an implementation agent; on token-limit failure, offer codex fallback.
@@ -1915,6 +2264,7 @@ def _call_agent_with_fallback(
         if rolled:
             for f in rolled:
                 info(f"  Rolled back: {f}")
+        _persist_stage_fallback("implementation", state, config)
         return invoke_codex_fallback(prompt, config)
 
     return output
@@ -1939,6 +2289,7 @@ def _build_task_prompt(task: dict, prompt_file: Path) -> str:
 def _run_one_task(
     task: dict,
     prompt_file: Path,
+    state: dict,
     config: dict,
     task_data: dict,
     log_lines: list,
@@ -1946,8 +2297,10 @@ def _run_one_task(
     """Execute a single task and update shared state.  Thread-safe.  Returns True on success."""
     task_id     = task["id"]
     description = task["description"]
-    agent_cfg   = config.get("agents", {}).get("implementation", {})
-    agent_name  = agent_cfg.get("command", "claude")
+    mode = get_selected_mode(state, config)
+    agent_key = resolve_stage_agent_key("implementation", state, config)
+    agent_cfg = config.get("agents", {}).get(agent_key, {})
+    agent_name = agent_cfg.get("command", agent_key)
 
     _emit(TaskStarted(
         task_id=str(task_id),
@@ -1960,7 +2313,10 @@ def _run_one_task(
     t0 = datetime.now(timezone.utc)
     try:
         task_prompt = _build_task_prompt(task, prompt_file)
-        _call_agent_with_fallback("implementation", task_prompt, config)
+        if mode == "default" and agent_key == "implementation":
+            _call_agent_with_fallback(agent_key, task_prompt, state, config)
+        else:
+            call_agent(agent_key, task_prompt, config)
 
         duration_ms = int((datetime.now(timezone.utc) - t0).total_seconds() * 1000)
         _emit(TaskCompleted(
@@ -2008,6 +2364,7 @@ def _run_one_task(
 def _execute_parallel_groups(
     task_data: dict,
     prompt_file: Path,
+    state: dict,
     config: dict,
     log_lines: list,
 ) -> None:
@@ -2037,7 +2394,7 @@ def _execute_parallel_groups(
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {
-                pool.submit(_run_one_task, task, prompt_file, config, task_data, log_lines): task
+                pool.submit(_run_one_task, task, prompt_file, state, config, task_data, log_lines): task
                 for task in runnable
             }
             for future in as_completed(futures):
@@ -2054,7 +2411,7 @@ def _execute_parallel_groups(
             warn(f"    Task {task['id']} blocked by {blocked}. Skipping.")
             continue
         dep_statuses[task["id"]] = (
-            "completed" if _run_one_task(task, prompt_file, config, task_data, log_lines)
+            "completed" if _run_one_task(task, prompt_file, state, config, task_data, log_lines)
             else "failed"
         )
 
@@ -2064,7 +2421,9 @@ def _execute_parallel_groups(
 # ─────────────────────────────────────────────────────────────
 
 def run_implementation(state: dict, config: dict) -> None:
-    banner("Stage: Implementation (Claude)")
+    mode = get_selected_mode(state, config)
+    agent_key = resolve_stage_agent_key("implementation", state, config)
+    banner(f"Stage: Implementation [mode={mode} agent={agent_key}]")
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
     create_git_branch(state, config)
@@ -2098,7 +2457,7 @@ def run_implementation(state: dict, config: dict) -> None:
     parallel_groups = task_data.get("parallel_groups", [])
     if parallel_groups:
         info(f"Parallel groups detected ({len(parallel_groups)} groups) — running concurrently.")
-        _execute_parallel_groups(task_data, prompt_file, config, log_lines)
+        _execute_parallel_groups(task_data, prompt_file, state, config, log_lines)
     else:
         # No parallel groups — run sequentially via the shared helper.
         dep_statuses = {t["id"]: t["status"] for t in tasks}
@@ -2108,7 +2467,7 @@ def run_implementation(state: dict, config: dict) -> None:
             if blocked:
                 warn(f"    Task {task['id']} blocked by {blocked}. Skipping.")
                 continue
-            succeeded = _run_one_task(task, prompt_file, config, task_data, log_lines)
+            succeeded = _run_one_task(task, prompt_file, state, config, task_data, log_lines)
             dep_statuses[task["id"]] = "completed" if succeeded else "failed"
 
     IMPLEMENTATION_LOG_FILE.write_text("\n".join(log_lines), encoding="utf-8")
@@ -2350,10 +2709,8 @@ def run_init() -> None:
         d.mkdir(parents=True, exist_ok=True)
 
     if not STATE_FILE.exists():
-        save_state({
-            "current_stage": "idle", "branch": None,
-            "started_at": None, "last_updated": None, "completed_stages": [],
-        })
+        initial_config = load_config() if CONFIG_FILE.exists() else DEFAULT_CONFIG
+        save_state(_default_state(initial_config))
         success(f"Created {STATE_FILE.relative_to(REPO_ROOT)}")
     else:
         info(f"Skipped {STATE_FILE.relative_to(REPO_ROOT)} (already exists)")
@@ -2396,8 +2753,11 @@ def show_status(state: dict) -> None:
     banner("A.I.N. Pipeline — Status")
     current   = state.get("current_stage", "unknown")
     completed = state.get("completed_stages", [])
+    mode = get_selected_mode(state, load_config())
+    details = get_mode_details(mode)
 
     print(f"  Stage:   {C.BOLD}{C.CYAN}{STAGE_LABELS.get(current, current)}{C.RESET}")
+    print(f"  Mode:    {C.DIM}{details['label']} | {details['summary']}{C.RESET}")
     if state.get("branch"):
         print(f"  Branch:  {C.DIM}{state['branch']}{C.RESET}")
     if state.get("started_at"):
@@ -2456,7 +2816,17 @@ def run_pipeline(
 
     ensure_config()
     config = load_config()
-    state  = load_state()
+    state  = load_state(config)
+
+    if renderer is not None and hasattr(renderer, "configure_mode_controls"):
+        def _cycle_mode_from_tui() -> dict[str, str]:
+            fresh_config = load_config()
+            return cycle_pipeline_mode(load_state(fresh_config), fresh_config)
+
+        renderer.configure_mode_controls(
+            get_mode_details(get_selected_mode(state, config)),
+            _cycle_mode_from_tui,
+        )
 
     if state["current_stage"] == FAILED:
         warn("Pipeline is in a failed state. Use --reset or --resume <stage>.")
@@ -2505,7 +2875,7 @@ def run_pipeline(
         _emit(StageStarted(stage_id=stage, started_at=started_at))
         try:
             runner(state, config)
-            state = load_state()
+            state = load_state(config)
             ended_at = _now_iso()
             duration_ms = int((datetime.now(timezone.utc) - t0).total_seconds() * 1000)
             _emit(StageCompleted(stage_id=stage, ended_at=ended_at, duration_ms=duration_ms))
@@ -2519,7 +2889,7 @@ def run_pipeline(
             _emit(RunCompleted(run_id=_RUN_ID, ended_at=_now_iso(), status=RunStatus.INTERRUPTED))
             sys.exit(0)
 
-    state = load_state()
+    state = load_state(config)
     if state["current_stage"] == "done":
         banner("Pipeline Complete")
         show_status(state)
@@ -2580,8 +2950,7 @@ def main() -> None:
         return
 
     if args.reset:
-        save_state({"current_stage": "idle", "branch": None,
-                    "started_at": None, "last_updated": None, "completed_stages": []})
+        save_state(_default_state(load_config()))
         if PLANNING_APPROVED_FLAG.exists():
             PLANNING_APPROVED_FLAG.unlink()
         success("Pipeline reset to idle.")
@@ -2609,6 +2978,11 @@ def main() -> None:
         return
 
     if args.command == "run":
+        config = load_config()
+        state = load_state(config)
+        selected_mode = prompt_for_pipeline_mode(state, config)
+        if selected_mode != get_selected_mode(state, config):
+            set_pipeline_mode(selected_mode, state, config)
         single = bool(getattr(args, "stage", None))
         plain  = getattr(args, "plain", False)
         _run_with_tui(
