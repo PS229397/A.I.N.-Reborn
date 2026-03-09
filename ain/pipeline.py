@@ -42,11 +42,13 @@ from pathlib import Path
 from textwrap import dedent
 from typing import Any
 
+from ain.models.state import StageTiming
 from ain.runtime.emitter import Emitter
 from ain.runtime.events import (
     ApprovedEvent,
     ApprovalReceived,
     AwaitingApproval,
+    HealthCheckResult,
     LogLevel,
     LogLine,
     LogSource,
@@ -57,12 +59,14 @@ from ain.runtime.events import (
     StageFailed,
     StageQueued,
     StageStarted,
+    StageTimingUpdated,
     TaskCompleted,
     TaskFailed,
     TaskStarted,
     AgentOutput,
     WaitingApprovalEvent,
 )
+from ain.services import config_service, log_service, state_service
 
 # 
 # Helpers
@@ -3187,6 +3191,50 @@ def run_pipeline(
         state["status"] = "running"
     save_state(state)
 
+    def _record_stage_timing(stage_id: str, started_at: str, ended_at: str, duration_ms: int, status: str) -> None:
+        """Persist timing metrics and emit related events without crashing the run."""
+        timing = StageTiming(
+            stage_name=stage_id,
+            started_at=started_at,
+            ended_at=ended_at,
+            duration_ms=duration_ms,
+            status=status,
+        )
+        try:
+            state_service.record_stage_timing(timing)
+        except Exception as exc:  # noqa: BLE001 - defensive logging
+            warn(f"Unable to record timing for {stage_id}: {exc}")
+        else:
+            _emit(StageTimingUpdated(stage_id=stage_id, timing=timing))
+            try:
+                log_service.log_stage_timing(stage_id, timing)
+            except Exception:
+                # Logging failures must not crash the pipeline
+                pass
+
+    # Run a health check before executing any stages so we can fail fast with guidance.
+    try:
+        health_summary = config_service.get_health_summary(REPO_ROOT)
+        _emit(HealthCheckResult(summary=health_summary, checked_at=_now_iso()))
+    except Exception as exc:  # noqa: BLE001 - defensive
+        warn(f"Health check failed: {exc}")
+        health_summary = None
+
+    if health_summary and getattr(health_summary, "overall_status", "") == "unhealthy":
+        error("Environment health check failed. See health summary for details.")
+        state["last_error"] = {
+            "code": "HEALTH_CHECK_FAILED",
+            "message": "Health check reported an unhealthy environment.",
+            "details": {"overall_status": health_summary.overall_status},
+            "stage": None,
+            "recoverable": False,
+        }
+        state["status"] = FAILED
+        state["current_stage"] = FAILED
+        save_state(state)
+        _emit(RunCompleted(run_id=_RUN_ID, ended_at=_now_iso(), status=RunStatus.FAILED))
+        return
+
     if renderer is not None and hasattr(renderer, "configure_mode_controls"):
         def _cycle_mode_from_tui() -> dict[str, str]:
             fresh_config = load_config()
@@ -3230,6 +3278,7 @@ def run_pipeline(
     _emit(RunStarted(run_id=_RUN_ID, started_at=_now_iso(), mode=mode))  # type: ignore[arg-type]
 
     runnable = [s for s in to_run if s not in ("idle", "done") and STAGE_RUNNERS.get(s)]
+    stage_indices = {stage: idx for idx, stage in enumerate(runnable)}
     for i, stage in enumerate(runnable):
         _emit(StageQueued(stage_id=stage, stage_name=STAGE_LABELS.get(stage, stage), index=i))
 
@@ -3239,24 +3288,86 @@ def run_pipeline(
         runner = STAGE_RUNNERS.get(stage)
         if not runner:
             continue
+        stage_label = STAGE_LABELS.get(stage, stage)
         started_at = _now_iso()
-        t0 = datetime.now(timezone.utc)
-        _emit(StageStarted(stage_id=stage, started_at=started_at))
+        t0 = time.perf_counter()
+        _emit(
+            StageStarted(
+                stage_id=stage,
+                started_at=started_at,
+                stage_name=stage_label,
+                index=stage_indices.get(stage),
+            )
+        )
         try:
             runner(state, config)
             state = load_state(config)
             ended_at = _now_iso()
-            duration_ms = int((datetime.now(timezone.utc) - t0).total_seconds() * 1000)
-            _emit(StageCompleted(stage_id=stage, ended_at=ended_at, duration_ms=duration_ms))
-        except RuntimeError as e:
-            ended_at = _now_iso()
-            _emit(StageFailed(stage_id=stage, ended_at=ended_at, error=str(e)))
-            _emit(RunCompleted(run_id=_RUN_ID, ended_at=ended_at, status=RunStatus.FAILED))
-            fail_pipeline(state, str(e))
+            duration_ms = int((time.perf_counter() - t0) * 1000)
+            _record_stage_timing(stage, started_at, ended_at, duration_ms, "success")
+            _emit(
+                StageCompleted(
+                    stage_id=stage,
+                    stage_name=stage_label,
+                    ended_at=ended_at,
+                    duration_ms=duration_ms,
+                    status="success",
+                )
+            )
         except KeyboardInterrupt:
+            ended_at = _now_iso()
+            duration_ms = int((time.perf_counter() - t0) * 1000)
+            _record_stage_timing(stage, started_at, ended_at, duration_ms, "failed")
+            _emit(
+                StageFailed(
+                    stage_id=stage,
+                    stage_name=stage_label,
+                    ended_at=ended_at,
+                    error="Interrupted by user.",
+                    error_code="INTERRUPTED",
+                )
+            )
+            _emit(RunCompleted(run_id=_RUN_ID, ended_at=ended_at, status=RunStatus.INTERRUPTED))
             warn("\nInterrupted by user.")
-            _emit(RunCompleted(run_id=_RUN_ID, ended_at=_now_iso(), status=RunStatus.INTERRUPTED))
             sys.exit(0)
+        except Exception as e:  # noqa: BLE001 - error fencing
+            ended_at = _now_iso()
+            duration_ms = int((time.perf_counter() - t0) * 1000)
+            err_msg = str(e)
+            err_code = getattr(e, "code", None)
+            _record_stage_timing(stage, started_at, ended_at, duration_ms, "failed")
+            _emit(
+                StageFailed(
+                    stage_id=stage,
+                    stage_name=stage_label,
+                    ended_at=ended_at,
+                    error=err_msg,
+                    error_code=err_code,
+                )
+            )
+            _emit(RunCompleted(run_id=_RUN_ID, ended_at=ended_at, status=RunStatus.FAILED))
+            try:
+                log_service.log_error_record(
+                    err_code or "PIPELINE_STAGE_ERROR",
+                    err_msg,
+                    stage=stage,
+                    details={"stage": stage},
+                    recoverable=True,
+                )
+            except Exception:
+                pass
+            state = load_state(config)
+            state["last_error"] = {
+                "code": err_code or "PIPELINE_STAGE_ERROR",
+                "message": err_msg,
+                "details": {"stage": stage},
+                "stage": stage,
+                "recoverable": True,
+            }
+            state["status"] = FAILED
+            state["current_stage"] = stage
+            save_state(state)
+            fail_pipeline(state, err_msg)
 
     state = load_state(config)
     if state["current_stage"] == "done":

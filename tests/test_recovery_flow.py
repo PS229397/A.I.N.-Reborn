@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
+
+from click.testing import CliRunner
 
 from ain import pipeline
+from ain.cli import main as cli_main
+from ain.models.state import HealthSummary
+from ain.services import state_service
+from ain.services.state_service import STATE_SCHEMA_VERSION
 
 
 def _configure_runtime_paths(monkeypatch, tmp_path):
@@ -92,3 +99,48 @@ def test_continue_recovers_from_paused_checkpoint_and_completes(monkeypatch, tmp
     assert persisted["current_stage"] == "done"
     assert persisted["last_safe_stage"] == "architecture"
     assert persisted["last_attempted_stage"] == "architecture"
+
+
+def test_status_cli_repairs_corrupted_state_and_reports_error(monkeypatch, tmp_path):
+    corrupted_payload = {
+        "version": STATE_SCHEMA_VERSION,
+        "current_stage": 123,  # invalid type to trigger schema failure
+        "status": "idle",
+        "created_at": "",
+        "updated_at": "",
+    }
+
+    pipeline_dir = tmp_path / ".ai-pipeline"
+    pipeline_dir.mkdir()
+    state_path = pipeline_dir / "state.json"
+    state_path.write_text(json.dumps(corrupted_payload), encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(state_service, "_now_iso", lambda: "2026-03-09T12:00:00+00:00")
+
+    healthy_summary = HealthSummary(
+        external_binaries={},
+        config_files={},
+        state_files={"state_json": {"name": "state.json", "status": "ok", "message": "repaired", "details": {}}},
+        overall_status="healthy",
+    )
+    monkeypatch.setattr(
+        "ain.services.config_service.get_health_summary",
+        lambda project_root=None: healthy_summary,
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli_main, ["status", "--json"])
+
+    assert result.exit_code == 0
+
+    repaired = json.loads(state_path.read_text(encoding="utf-8"))
+    assert repaired["version"] == STATE_SCHEMA_VERSION
+    assert repaired["last_error"]["code"] == "STATE_CORRUPT"
+    backup_path = Path(repaired["last_error"]["details"]["backup_path"])
+    assert backup_path.exists()
+    assert backup_path.read_text(encoding="utf-8") == json.dumps(corrupted_payload)
+    assert repaired["created_at"] == "2026-03-09T12:00:00+00:00"
+
+    payload = json.loads(result.output)
+    assert payload["pipeline_state"]["last_error"]["code"] == "STATE_CORRUPT"

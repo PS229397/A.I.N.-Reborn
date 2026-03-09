@@ -118,5 +118,37 @@
       "Makefile",
       "README.md"
     ]
+  },
+  "runtime": {
+    "timeouts": {
+      "default_seconds": 480,
+      "per_stage": {
+        "scanning": 180,
+        "architecture": 420,
+        "planning_questions": 300,
+        "planning_generation": 480,
+        "task_creation": 360,
+        "implementation": 900,
+        "validation": 420
+      }
+    },
+    "retries": {
+      "max_attempts": 2,
+      "backoff_seconds": 5,
+      "backoff_multiplier": 1.5,
+      "jitter": true,
+      "fail_fast": {
+        "on_missing_binary": true,
+        "on_timeout": false,
+        "on_corrupted_state": true
+      }
+    },
+    "cache": {
+      "enabled": true,
+      "path": ".ai-pipeline/cache",
+      "ttl_seconds": 604800,
+      "max_entries": 64,
+      "respect_cli_no_cache": true
+    }
   }
 }
