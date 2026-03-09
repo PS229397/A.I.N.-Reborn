@@ -1,24 +1,11 @@
 # Architecture Analysis Prompt
 
-You are a senior software architect. Analyze the provided repository metadata and produce a precise architecture document.
+You are a senior software architect. Analyze the repository metadata below and produce an architecture document.
 
-## Files You May Read
-- `.ai-pipeline/scan/repo_tree.txt`
-- `.ai-pipeline/scan/repo_summary.md`
-- `.ai-pipeline/scan/tracked_files.txt`
+CRITICAL: You do NOT have access to any tools, file system, or shell in this context. Do NOT attempt to call write_file, run_shell_command, read_file, or any other tool — they will all fail. Your ONLY output mechanism is your text response. Write the entire document directly as your response text.
 
-## Files You Must Write
-- `docs/architecture.md`
+The document MUST contain ALL of the following headings in this exact order:
 
-## Files You Must NOT Modify
-- Any source code files
-- `.ai-pipeline/state.json`
-
-## Output Format
-
-Produce `docs/architecture.md` containing ALL of the following headings in this exact format:
-
-```
 # System Overview
 # Tech Stack
 # Repo Structure
@@ -29,12 +16,5 @@ Produce `docs/architecture.md` containing ALL of the following headings in this 
 # State Management
 # Testing Strategy
 # Risks and Unknowns
-```
 
-Under each heading:
-- Reference concrete file paths, module names, and component names from the scan data
-- Do not invent components that are not evidenced in the scan
-- If information is absent, say so explicitly under that heading
-- Be architectural, not generic
-
-Write the document to `docs/architecture.md`. Output only the document content — no preamble.
+Under each heading, reference concrete file paths and module names from the metadata below. Do not invent anything not evidenced in the data. Output ONLY the markdown document — no preamble, no explanation, no tool calls.

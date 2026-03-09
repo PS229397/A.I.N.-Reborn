@@ -58,6 +58,7 @@ from ain.runtime.events import (
     TaskCompleted,
     TaskFailed,
     TaskStarted,
+    AgentOutput,
 )
 
 # ─────────────────────────────────────────────────────────────
@@ -492,6 +493,84 @@ def call_agent(agent_name: str, prompt: str, config: dict) -> str:
         raise RuntimeError(f"Agent '{agent_name}' timed out after 600 seconds.")
 
 
+def _run_agent_background(
+    cmd: list,
+    agent_name: str,
+    log_slug: str = "",
+    input_text: str | None = None,
+) -> tuple[int, str]:
+    """Run an agent subprocess in the background, streaming its output to the TUI
+    agent panel via AgentOutput events. The TUI stays live — no suspend/resume.
+
+    If *input_text* is provided it is written to stdin then stdin is closed,
+    so the agent receives the prompt without blocking on the TUI keyboard thread.
+    If omitted, stdin is DEVNULL.
+
+    Returns (exit_code, captured_output).
+    """
+    slug = log_slug or agent_name.lower().replace(" ", "_")
+    mode = "stdin" if input_text is not None else "devnull"
+    _log(f"AGENT CALL: {agent_name} via {cmd[0]}\n\t(prompt_mode=background/{mode})")
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(REPO_ROOT),
+            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except FileNotFoundError:
+        raise RuntimeError(f"Agent command not found: '{cmd[0]}'")
+
+    output_lines: list[str] = []
+
+    if input_text is not None:
+        # Write stdin in a background thread so it doesn't block stdout reading.
+        # This mirrors what communicate() does internally but lets us stream each
+        # line to the TUI as it arrives instead of waiting for the process to finish.
+        def _writer() -> None:
+            assert proc.stdin is not None
+            try:
+                proc.stdin.write(input_text)
+                proc.stdin.close()
+            except OSError:
+                pass
+
+        writer = threading.Thread(target=_writer, daemon=True)
+        writer.start()
+
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.rstrip("\n\r")
+            output_lines.append(line)
+            _emit(AgentOutput(ts=_now_iso(), line=line, agent=agent_name))
+
+        writer.join(timeout=5)
+        proc.wait()
+    else:
+        # No stdin — stream stdout live line by line.
+        def _reader() -> None:
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                line = raw.rstrip("\n\r")
+                output_lines.append(line)
+                _emit(AgentOutput(ts=_now_iso(), line=line, agent=agent_name))
+
+        reader = threading.Thread(target=_reader, daemon=True)
+        reader.start()
+        proc.wait()
+        reader.join(timeout=5)
+
+    captured = "\n".join(output_lines)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    (LOGS_DIR / f"{slug}_last_output.txt").write_text(captured, encoding="utf-8")
+    return proc.returncode, captured
+
+
 def read_context_files(*files: Path) -> str:
     parts = []
     for f in files:
@@ -717,32 +796,80 @@ def run_scan(state: dict, config: dict) -> None:
 # ─────────────────────────────────────────────────────────────
 
 def run_architecture(state: dict, config: dict) -> None:
-    banner("Stage: Architecture Generation (Gemini)")
+    banner("Stage: Architecture Generation")
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-    step(1, 2, "Building prompt ...")
-    prompt = build_prompt(
+    step(1, 3, "Building prompt ...")
+    prompt_instructions = (PROMPTS_DIR / "architecture_prompt.md").read_text(encoding="utf-8")
+    # Full prompt with embedded context — used by Codex fallback.
+    full_prompt = build_prompt(
         PROMPTS_DIR / "architecture_prompt.md",
         REPO_TREE_FILE, REPO_SUMMARY_FILE, TRACKED_FILES_FILE,
     )
+    (LOGS_DIR / "architecture_last_prompt.txt").write_text(prompt_instructions, encoding="utf-8")
 
-    step(2, 2, "Calling architecture agent ...")
-    # Remove any stale file so we can detect if the agent writes it directly.
+    agent_cfg  = config["agents"].get("architecture", {})
+    command    = agent_cfg.get("command", "gemini")
+    resolved   = shutil.which(command) or command
+    extra_args = agent_cfg.get("args", [])
+
+    def _gemini_ok() -> bool:
+        """True if architecture.md exists and passes heading validation."""
+        return (
+            ARCHITECTURE_FILE.exists()
+            and ARCHITECTURE_FILE.stat().st_size > 0
+            and not validate_headings(ARCHITECTURE_FILE, ARCHITECTURE_HEADINGS)
+        )
+
+    step(2, 3, "Calling Gemini architecture agent ...")
     if ARCHITECTURE_FILE.exists():
         ARCHITECTURE_FILE.unlink()
 
-    output = call_agent("architecture", prompt, config)
+    rc, gemini_output = _run_agent_background(
+        [resolved] + extra_args,
+        agent_name="Gemini",
+        log_slug="architecture",
+        input_text=full_prompt,  # embed context directly — .ai-pipeline/ may be gitignored
+    )
 
-    if ARCHITECTURE_FILE.exists() and ARCHITECTURE_FILE.stat().st_size > 0:
-        # Agent wrote the file itself (e.g. Gemini using its file-write tool).
-        # stdout only contains reasoning narration — do not overwrite the file.
-        info("Architecture agent wrote docs/architecture.md directly.")
-    elif output.strip():
-        # Agent returned content via stdout — write it to the file.
-        ARCHITECTURE_FILE.write_text(output, encoding="utf-8")
-        success(f"Written → {ARCHITECTURE_FILE.relative_to(REPO_ROOT)}")
-    else:
-        raise RuntimeError("Architecture agent returned empty output and did not write docs/architecture.md.")
+    # Gemini outputs to stdout (no write_file tool available via stdin mode).
+    # Strip executor noise lines that Gemini emits when tool calls are blocked.
+    if not (ARCHITECTURE_FILE.exists() and ARCHITECTURE_FILE.stat().st_size > 0):
+        clean_output = "\n".join(
+            l for l in gemini_output.splitlines()
+            if not l.startswith("[LocalAgentExecutor]")
+            and not l.startswith("Attempt ")
+            and not l.startswith("Error executing tool")
+        ).strip()
+        if clean_output:
+            ARCHITECTURE_FILE.write_text(clean_output, encoding="utf-8")
+            success(f"Written → {ARCHITECTURE_FILE.relative_to(REPO_ROOT)}")
+
+    if rc != 0 or not _gemini_ok():
+        warn(f"Gemini {'exited with code ' + str(rc) if rc != 0 else 'did not produce a valid architecture.md'}.")
+        warn("Falling back to Codex for architecture generation ...")
+
+        step(3, 3, "Calling Codex fallback agent ...")
+        if ARCHITECTURE_FILE.exists():
+            ARCHITECTURE_FILE.unlink()
+
+        codex_cmd = shutil.which("codex") or "codex"
+        _, codex_output = _run_agent_background(
+            [codex_cmd],
+            agent_name="Codex (arch fallback)",
+            log_slug="architecture_codex",
+            input_text=full_prompt,
+        )
+
+        # Codex may write the file directly or output it to stdout.
+        if not (ARCHITECTURE_FILE.exists() and ARCHITECTURE_FILE.stat().st_size > 0):
+            if codex_output.strip():
+                ARCHITECTURE_FILE.write_text(codex_output, encoding="utf-8")
+            else:
+                raise RuntimeError(
+                    "Both Gemini and Codex failed to produce docs/architecture.md."
+                )
 
     missing = validate_headings(ARCHITECTURE_FILE, ARCHITECTURE_HEADINGS)
     if missing:
@@ -1020,8 +1147,33 @@ def run_planning_questions(state: dict, config: dict) -> None:
 
     info("Suspending TUI — starting Codex brainstorm session ...")
     info(f"Context: {brainstorm_context.relative_to(REPO_ROOT)}")
-    info(f"When Codex finishes, it will write:\n\t{OPEN_QUESTIONS_FILE.relative_to(REPO_ROOT)}")
-    _run_suspended([codex_cmd, brainstorm_prompt], "Codex Brainstorm Session")
+    info(f"Codex will auto-close once it writes {OPEN_QUESTIONS_FILE.name}.")
+
+    if _RENDERER is not None:
+        _RENDERER.suspend()
+    try:
+        print(f"\n\033[1;96m  ── Codex Brainstorm Session ──\033[0m\n")
+        proc = subprocess.Popen(
+            [codex_cmd, brainstorm_prompt],
+            cwd=str(REPO_ROOT),
+        )
+
+        def _watch_and_close() -> None:
+            """Terminate Codex automatically once OPEN_QUESTIONS.md appears."""
+            while proc.poll() is None:
+                if OPEN_QUESTIONS_FILE.exists() and OPEN_QUESTIONS_FILE.stat().st_size > 0:
+                    time.sleep(2)   # let Codex finish any in-progress writes
+                    if proc.poll() is None:
+                        proc.terminate()
+                    return
+                time.sleep(1)
+
+        watcher = threading.Thread(target=_watch_and_close, daemon=True)
+        watcher.start()
+        proc.wait()
+    finally:
+        if _RENDERER is not None:
+            _RENDERER.resume()
 
     if not OPEN_QUESTIONS_FILE.exists():
         warn("OPEN_QUESTIONS.md not found. Creating placeholder.")
@@ -1055,8 +1207,10 @@ def run_planning_generation(state: dict, config: dict) -> None:
         f"Do not ask questions — generate the complete documents now."
     )
 
-    info("Suspending TUI — starting Codex planning generation ...")
-    _run_suspended([codex_cmd, plan_prompt], "Codex Planning Generation")
+    info("Running Codex planning generation (output shown in AGENT.OUTPUT panel) ...")
+    _run_agent_background(
+        [codex_cmd, plan_prompt], agent_name="Codex", log_slug="planning_generation"
+    )  # return value not needed — Codex writes files directly
 
     for doc, headings, name in [
         (PRD_FILE,          PRD_HEADINGS,    "PRD.md"),
@@ -1275,7 +1429,14 @@ def run_task_creation(state: dict, config: dict) -> None:
         prompt = build_prompt(prompt_file, *ctx_files)
 
         step(2, 2, "Calling task creation agent ...")
-        output = call_agent("task_creation", prompt, config)
+        agent_cfg  = config.get("agents", {}).get("task_creation", {})
+        command    = shutil.which(agent_cfg.get("command", "claude")) or agent_cfg.get("command", "claude")
+        extra_args = agent_cfg.get("args", [])
+        _, output = _run_agent_background(
+            [command] + extra_args + [prompt],
+            agent_name=agent_cmd or "Task Agent",
+            log_slug="task_creation",
+        )
         if not output.strip():
             raise RuntimeError("Task creation agent returned empty output.")
         _parse_and_write_task_artifacts(output)

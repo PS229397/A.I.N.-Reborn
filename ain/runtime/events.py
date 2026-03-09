@@ -106,6 +106,15 @@ class TaskFailed:
     error:       str = ""
 
 
+# ── Agent output ──────────────────────────────────────────────
+
+@dataclass
+class AgentOutput:
+    ts:    str
+    line:  str
+    agent: str = ""
+
+
 # ── Approval ──────────────────────────────────────────────────
 
 @dataclass

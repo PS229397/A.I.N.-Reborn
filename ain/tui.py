@@ -27,6 +27,7 @@ from ain.runtime.events import (
     TaskCompleted,
     TaskFailed,
     AwaitingApproval,
+    AgentOutput,
     RunStatus,
 )
 
@@ -94,6 +95,11 @@ class RichRenderer:
         self._feed        : Deque[Text] = collections.deque(maxlen=MAX_FEED_LINES)
         self._feed_scroll : int         = 0   # lines hidden from bottom (0 = live)
 
+        # ── Agent output ────────────────────────────────────────────────────
+        self._agent_output: Deque[Text] = collections.deque(maxlen=MAX_FEED_LINES)
+        self._agent_scroll: int         = 0
+        self._agent_name  : str         = ""
+
         # ── Inline input ───────────────────────────────────────────────────
         self._input_pending: bool            = False
         self._input_prompt : str             = ""
@@ -154,15 +160,25 @@ class RichRenderer:
                 self._live.stop()
             except Exception:
                 pass
+            self._live = None
 
     def resume(self) -> None:
-        """Restart the Live display after a subprocess has finished."""
-        if self._live is not None:
-            try:
-                self._live.start()
-            except Exception:
-                pass
-            self._refresh()
+        """Create a fresh Live display after a subprocess has finished.
+
+        Rich's Live cannot be restarted after stop() — a new instance is required.
+        """
+        self._live = Live(
+            self._build_layout(),
+            console=self._console,
+            refresh_per_second=8,
+            screen=True,
+        )
+        try:
+            self._live.start()
+        except Exception:
+            self._live = None
+            return
+        self._refresh()
 
     def request_input(self, prompt: str) -> str:
         """Show *prompt* in the INPUT panel and wait for the user to press Enter.
@@ -312,6 +328,10 @@ class RichRenderer:
                 ss = self._stage_map.get(event.stage_id)
                 if ss:
                     ss.status = "running"
+                # Clear agent panel between stages
+                self._agent_output.clear()
+                self._agent_scroll = 0
+                self._agent_name   = ""
 
             elif isinstance(event, StageCompleted):
                 ss = self._stage_map.get(event.stage_id)
@@ -347,6 +367,14 @@ class RichRenderer:
                 if event.error:
                     t.append(f"  {event.error}", style=C_ERR)
                 self._feed.append(t)
+
+            elif isinstance(event, AgentOutput):
+                if event.agent and event.agent != self._agent_name:
+                    self._agent_name = event.agent
+                t = Text()
+                t.append(event.line, style=C_PRIMARY)
+                self._agent_output.append(t)
+                self._agent_scroll = 0   # stay live
 
             elif isinstance(event, AwaitingApproval):
                 t = Text()
@@ -400,12 +428,17 @@ class RichRenderer:
             Layout(name="footer",      size=3),
         )
         root["body"].split_row(
-            Layout(name="deck", ratio=1),
-            Layout(name="feed", ratio=2),
+            Layout(name="deck",  ratio=1),
+            Layout(name="right", ratio=3),
+        )
+        root["right"].split_column(
+            Layout(name="feed",         ratio=1),
+            Layout(name="agent_output", ratio=1),
         )
         root["header"].update(self._render_header())
         root["deck"].update(self._render_deck())
         root["feed"].update(self._render_feed())
+        root["agent_output"].update(self._render_agent_output())
         root["input_panel"].update(self._render_input())
         root["footer"].update(self._render_footer())
         return root
@@ -453,13 +486,26 @@ class RichRenderer:
             padding=(1, 1),
         )
 
+    def _panel_lines(self) -> int:
+        """Approximate number of content lines available in each half-height panel."""
+        h = self._console.size.height
+        # header(3) + input(5) + footer(3) + borders ≈ 13 overhead
+        # body splits right pane into feed + agent_output (ratio 1:1)
+        return max(5, (h - 13) // 2 - 2)
+
     def _render_feed(self) -> Panel:
         lines = list(self._feed)
         if not lines:
             body: Any = Text("Awaiting data feed…", style=f"dim {C_PRIMARY}")
         else:
             scroll = max(0, min(self._feed_scroll, len(lines) - 1))
-            visible = lines[:len(lines) - scroll] if scroll else lines
+            if scroll:
+                # scrolled up — show older window ending before the scroll offset
+                end = len(lines) - scroll
+                visible = lines[max(0, end - self._panel_lines()):end]
+            else:
+                # live mode — always show the most recent lines
+                visible = lines[-self._panel_lines():]
             body = Text()
             for i, line in enumerate(visible):
                 if i:
@@ -468,6 +514,30 @@ class RichRenderer:
         return Panel(
             body,
             title=Text("// DATA FEED", style=C_ACCENT),
+            border_style=C_ACCENT,
+            padding=(0, 1),
+        )
+
+    def _render_agent_output(self) -> Panel:
+        title_label = f"// AGENT.OUTPUT — {self._agent_name}" if self._agent_name else "// AGENT.OUTPUT"
+        lines = list(self._agent_output)
+        if not lines:
+            body: Any = Text("No agent running.", style=f"dim {C_PRIMARY}")
+        else:
+            scroll = max(0, min(self._agent_scroll, len(lines) - 1))
+            if scroll:
+                end = len(lines) - scroll
+                visible = lines[max(0, end - self._panel_lines()):end]
+            else:
+                visible = lines[-self._panel_lines():]
+            body = Text()
+            for i, line in enumerate(visible):
+                if i:
+                    body.append("\n")
+                body.append_text(line)
+        return Panel(
+            body,
+            title=Text(title_label, style=C_ACCENT),
             border_style=C_ACCENT,
             padding=(0, 1),
         )
