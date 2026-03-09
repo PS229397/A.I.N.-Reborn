@@ -32,9 +32,9 @@ from ain.runtime.events import (
 
 # ── Colour constants ──────────────────────────────────────────────────────────
 
-C_PRIMARY  = "bright_cyan"   # text, stage names, feed messages
+C_PRIMARY  = "#00e5ff"       # text, stage names, feed messages
 C_ACCENT   = "#ff2d78"       # titles, keys, separators, active highlights
-C_ACTIVE   = "bold bright_cyan"
+C_ACTIVE   = "bold #00e5ff"
 C_DONE     = "bright_green"
 C_FAILED   = "bright_red"
 C_TS       = "dim cyan"      # timestamps, dim labels

@@ -224,7 +224,7 @@ class C:
     YELLOW  = "\033[93m" if _USE_COLOR else ""
     BLUE    = "\033[94m" if _USE_COLOR else ""
     MAGENTA = "\033[95m" if _USE_COLOR else ""
-    CYAN    = "\033[96m" if _USE_COLOR else ""
+    CYAN    = "\033[38;2;0;229;255m" if _USE_COLOR else ""
     WHITE   = "\033[97m" if _USE_COLOR else ""
 
 
@@ -727,12 +727,22 @@ def run_architecture(state: dict, config: dict) -> None:
     )
 
     step(2, 2, "Calling architecture agent ...")
-    output = call_agent("architecture", prompt, config)
-    if not output.strip():
-        raise RuntimeError("Architecture agent returned empty output.")
+    # Remove any stale file so we can detect if the agent writes it directly.
+    if ARCHITECTURE_FILE.exists():
+        ARCHITECTURE_FILE.unlink()
 
-    ARCHITECTURE_FILE.write_text(output, encoding="utf-8")
-    success(f"Written → {ARCHITECTURE_FILE.relative_to(REPO_ROOT)}")
+    output = call_agent("architecture", prompt, config)
+
+    if ARCHITECTURE_FILE.exists() and ARCHITECTURE_FILE.stat().st_size > 0:
+        # Agent wrote the file itself (e.g. Gemini using its file-write tool).
+        # stdout only contains reasoning narration — do not overwrite the file.
+        info("Architecture agent wrote docs/architecture.md directly.")
+    elif output.strip():
+        # Agent returned content via stdout — write it to the file.
+        ARCHITECTURE_FILE.write_text(output, encoding="utf-8")
+        success(f"Written → {ARCHITECTURE_FILE.relative_to(REPO_ROOT)}")
+    else:
+        raise RuntimeError("Architecture agent returned empty output and did not write docs/architecture.md.")
 
     missing = validate_headings(ARCHITECTURE_FILE, ARCHITECTURE_HEADINGS)
     if missing:
@@ -1019,6 +1029,7 @@ def run_planning_questions(state: dict, config: dict) -> None:
     else:
         success(f"Questions loaded: {OPEN_QUESTIONS_FILE.relative_to(REPO_ROOT)}")
 
+    _wait_for_user("Brainstorm complete. Press Enter to continue to planning generation ...")
     set_stage("planning_generation", state)
 
 
