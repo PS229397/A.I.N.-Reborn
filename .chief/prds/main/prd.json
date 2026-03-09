@@ -11,8 +11,8 @@
         "File contains at least one checkbox task in '- [ ] ...' format"
       ],
       "priority": 1,
-      "passes": true,
-      "inProgress": false
+      "passes": false,
+      "inProgress": true
     },
     {
       "id": "US-002",
@@ -23,7 +23,7 @@
         "File contains valid JSON with a 'tasks' array"
       ],
       "priority": 2,
-      "passes": true
+      "passes": false
     }
   ]
 }

@@ -62,6 +62,18 @@ from ain.runtime.events import (
 )
 
 # ─────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────
+
+# Strips ANSI/VT escape sequences from agent output so they don't corrupt
+# Rich's Live display when embedded in Text objects.
+_ANSI_ESC = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*\x07)")
+
+def _strip_ansi(s: str) -> str:
+    return _ANSI_ESC.sub("", s)
+
+
+# ─────────────────────────────────────────────────────────────
 # Paths  (REPO_ROOT = cwd so the package works in any repo)
 # ─────────────────────────────────────────────────────────────
 
@@ -493,6 +505,23 @@ def call_agent(agent_name: str, prompt: str, config: dict) -> str:
         raise RuntimeError(f"Agent '{agent_name}' timed out after 600 seconds.")
 
 
+def _kill_tree(p: subprocess.Popen) -> None:
+    """Kill a process and all its children (Windows-aware)."""
+    if p.poll() is not None:
+        return
+    if platform.system() == "Windows":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(p.pid)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    else:
+        import signal as _signal, os as _os
+        try:
+            _os.killpg(_os.getpgid(p.pid), _signal.SIGTERM)
+        except Exception:
+            p.terminate()
+
+
 def _run_agent_background(
     cmd: list,
     agent_name: str,
@@ -545,7 +574,7 @@ def _run_agent_background(
 
         assert proc.stdout is not None
         for raw in proc.stdout:
-            line = raw.rstrip("\n\r")
+            line = _strip_ansi(raw.rstrip("\n\r"))
             output_lines.append(line)
             _emit(AgentOutput(ts=_now_iso(), line=line, agent=agent_name))
 
@@ -556,7 +585,7 @@ def _run_agent_background(
         def _reader() -> None:
             assert proc.stdout is not None
             for raw in proc.stdout:
-                line = raw.rstrip("\n\r")
+                line = _strip_ansi(raw.rstrip("\n\r"))
                 output_lines.append(line)
                 _emit(AgentOutput(ts=_now_iso(), line=line, agent=agent_name))
 
@@ -1126,6 +1155,10 @@ def run_planning_questions(state: dict, config: dict) -> None:
     banner("Stage: Planning — Brainstorm (Codex)")
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Brief pause so the TUI can fully settle after the user_context
+    # suspend/resume cycle before we suspend again for Codex.
+    time.sleep(1.5)
+
     user_ctx = USER_CONTEXT_FILE.read_text(encoding="utf-8") if USER_CONTEXT_FILE.exists() else ""
     arch_ctx = ARCHITECTURE_FILE.read_text(encoding="utf-8") if ARCHITECTURE_FILE.exists() else ""
 
@@ -1152,19 +1185,23 @@ def run_planning_questions(state: dict, config: dict) -> None:
     if _RENDERER is not None:
         _RENDERER.suspend()
     try:
-        print(f"\n\033[1;96m  ── Codex Brainstorm Session ──\033[0m\n")
+        # Fully reset terminal state so Codex's TUI starts clean.
+        sys.stdout.write("\033[?25h\033[0m\033[2J\033[H")
+        sys.stdout.flush()
+        print(f"\033[1;96m  ── Codex Brainstorm Session ──\033[0m")
+        print(f"\033[96m  Codex will ask clarifying questions.")
+        print(f"  Press \033[1mEnter\033[0m\033[96m in Codex to confirm the prompt and start.\033[0m\n")
         proc = subprocess.Popen(
             [codex_cmd, brainstorm_prompt],
             cwd=str(REPO_ROOT),
         )
 
         def _watch_and_close() -> None:
-            """Terminate Codex automatically once OPEN_QUESTIONS.md appears."""
+            """Kill Codex (entire process tree) once OPEN_QUESTIONS.md appears."""
             while proc.poll() is None:
                 if OPEN_QUESTIONS_FILE.exists() and OPEN_QUESTIONS_FILE.stat().st_size > 0:
                     time.sleep(2)   # let Codex finish any in-progress writes
-                    if proc.poll() is None:
-                        proc.terminate()
+                    _kill_tree(proc)
                     return
                 time.sleep(1)
 
@@ -1172,6 +1209,9 @@ def run_planning_questions(state: dict, config: dict) -> None:
         watcher.start()
         proc.wait()
     finally:
+        sys.stdout.write("\033[?1049l\033[?25h\033[0m\r\n")
+        sys.stdout.flush()
+        time.sleep(0.5)
         if _RENDERER is not None:
             _RENDERER.resume()
 
@@ -1181,7 +1221,6 @@ def run_planning_questions(state: dict, config: dict) -> None:
     else:
         success(f"Questions loaded: {OPEN_QUESTIONS_FILE.relative_to(REPO_ROOT)}")
 
-    _wait_for_user("Brainstorm complete. Press Enter to continue to planning generation ...")
     set_stage("planning_generation", state)
 
 
@@ -1190,28 +1229,86 @@ def run_planning_questions(state: dict, config: dict) -> None:
 # ─────────────────────────────────────────────────────────────
 
 def run_planning_generation(state: dict, config: dict) -> None:
-    banner("Stage: Planning — Generation (Codex)")
+    banner("Stage: Planning — Generation")
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
-    codex_cmd = shutil.which("codex") or "codex"
-    docs_rel  = str(DOCS_DIR.relative_to(REPO_ROOT)).replace("\\", "/")
-    ctx_rel   = str(PIPELINE_DIR.relative_to(REPO_ROOT)).replace("\\", "/")
+    prompt_file = PROMPTS_DIR / "planning_generation_prompt.md"
+    ctx_files   = [
+        f for f in [
+            OPEN_QUESTIONS_FILE, OPEN_ANSWERS_FILE,
+            ARCHITECTURE_FILE, USER_CONTEXT_FILE,
+        ] if f.exists()
+    ]
+    prompt = build_prompt(prompt_file, *ctx_files)
 
-    plan_prompt = (
-        f"Using {ctx_rel}/user_context.md, {docs_rel}/OPEN_QUESTIONS.md, "
-        f"and {docs_rel}/architecture.md, write a complete feature plan. "
-        f"Create three files in {docs_rel}/: "
-        f"PRD.md with sections (# Problem, # Goals, # Non Goals, # User Stories, # Success Criteria), "
-        f"DESIGN.md with sections (# Architecture Changes, # Data Model, # API Changes, # UI Changes, # Risks), "
-        f"FEATURE_SPEC.md with a detailed implementation spec. "
-        f"Do not ask questions — generate the complete documents now."
+    # ── Primary: Codex suspended (needs real TTY), auto-closes when files appear ──
+    codex_bin = shutil.which("codex") or "codex"
+    _plan_docs = [PRD_FILE, DESIGN_FILE, FEATURE_SPEC_FILE]
+    planning_ok = False
+
+    # Clear stale docs so the watcher doesn't trigger immediately.
+    for _f in _plan_docs:
+        if _f.exists():
+            _f.unlink()
+
+    # Inline prompt for Codex as a CLI arg (no file markers — Codex writes directly).
+    codex_plan_prompt = (
+        f"Read .ai-pipeline/user_context.md, docs/OPEN_QUESTIONS.md, "
+        f"and docs/architecture.md to understand the feature request. "
+        f"Write three planning documents directly to disk — do NOT print them, write the files: "
+        f"docs/PRD.md (headings: # Problem, # Goals, # Non Goals, # User Stories, # Success Criteria), "
+        f"docs/DESIGN.md (headings: # Architecture Changes, # Data Model, # API Changes, # UI Changes, # Risks), "
+        f"docs/FEATURE_SPEC.md (detailed technical spec). "
+        f"Do not ask questions — generate all three files now."
     )
 
-    info("Running Codex planning generation (output shown in AGENT.OUTPUT panel) ...")
-    _run_agent_background(
-        [codex_cmd, plan_prompt], agent_name="Codex", log_slug="planning_generation"
-    )  # return value not needed — Codex writes files directly
+    info("Suspending TUI — running Codex for planning generation ...")
+    if _RENDERER is not None:
+        _RENDERER.suspend()
+    try:
+        sys.stdout.write("\033[?25h\033[0m\033[2J\033[H")
+        sys.stdout.flush()
+        print("\033[1;96m  ── Planning Generation (Codex) ──\033[0m\n")
 
+        proc = subprocess.Popen([codex_bin, codex_plan_prompt], cwd=str(REPO_ROOT))
+
+        def _watch_planning() -> None:
+            while proc.poll() is None:
+                if all(f.exists() and f.stat().st_size > 0 for f in _plan_docs):
+                    time.sleep(2)
+                    _kill_tree(proc)
+                    return
+                time.sleep(2)
+        threading.Thread(target=_watch_planning, daemon=True).start()
+
+        proc.wait()
+    finally:
+        sys.stdout.write("\033[?1049l\033[?25h\033[0m\r\n")
+        sys.stdout.flush()
+        time.sleep(0.5)
+        if _RENDERER is not None:
+            _RENDERER.resume()
+
+    if all(f.exists() and f.stat().st_size > 0 for f in _plan_docs):
+        planning_ok = True
+
+    # ── Fallback: claude --print, output in AGENT.OUTPUT panel ──────────────────
+    if not planning_ok:
+        warn("Codex did not write all planning docs. Falling back to claude --print ...")
+        claude_bin = shutil.which("claude")
+        if claude_bin:
+            _, output = _run_agent_background(
+                [claude_bin, "--print"],
+                agent_name="Claude (planning)",
+                log_slug="planning_generation_claude",
+                input_text=prompt,
+            )
+            if output.strip() and re.search(r"<!--\s*FILE:", output):
+                _parse_and_write_task_artifacts(output)
+        else:
+            warn("claude not found — no further fallback available.")
+
+    # ── Write stubs for any still-missing files ─────────────────────────────────
     for doc, headings, name in [
         (PRD_FILE,          PRD_HEADINGS,    "PRD.md"),
         (DESIGN_FILE,       DESIGN_HEADINGS, "DESIGN.md"),
@@ -1381,65 +1478,124 @@ def _build_task_graph_from_tasks_md() -> None:
     TASK_GRAPH_FILE.write_text(json.dumps(graph, indent=2), encoding="utf-8")
 
 
-def _run_chief_tui(config: dict) -> None:
-    """Run chief as an interactive TUI with a real TTY — no stdout capture."""
+def _run_chief_background(config: dict) -> tuple[bool, str]:
+    """Run chief non-interactively in the background, streaming output to AGENT.OUTPUT.
+
+    Returns (success, captured_output).
+    """
     agent_cfg  = config.get("agents", {}).get("task_creation", {})
     command    = agent_cfg.get("command", "chief")
     extra_args = agent_cfg.get("args", [])
 
     resolved = shutil.which(command)
     if not resolved:
-        raise RuntimeError(
-            f"Agent command not found: '{command}'. "
-            "Ensure chief is installed and on your PATH."
-        )
+        warn(f"chief not found on PATH. Falling back to Codex.")
+        return False, ""
 
     cmd = [resolved] + extra_args + ["--no-retry", "main"]
-    _log(f"RUN (TUI): {' '.join(str(c) for c in cmd)}")
-    info("Launching chief — work through the stories, then exit chief when done.")
-
-    result = subprocess.run(cmd, cwd=str(REPO_ROOT), env={**os.environ})
-    if result.returncode != 0:
-        warn(f"chief exited with code {result.returncode}")
+    info("Running chief in background (output in AGENT.OUTPUT panel) ...")
+    rc, output = _run_agent_background(cmd, agent_name="Chief", log_slug="task_creation")
+    if rc != 0:
+        warn(f"chief exited with code {rc}.")
+        return False, output
+    return True, output
 
 
 def run_task_creation(state: dict, config: dict) -> None:
-    banner("Stage: Task Creation (Chief)")
+    banner("Stage: Task Creation")
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
     prompt_file = PROMPTS_DIR / "task_creation_prompt.md"
     if not prompt_file.exists():
         raise RuntimeError(f"Missing prompt: {prompt_file}")
 
-    agent_cmd = config.get("agents", {}).get("task_creation", {}).get("command", "")
     ctx_files = [f for f in [PRD_FILE, DESIGN_FILE, FEATURE_SPEC_FILE, ARCHITECTURE_FILE] if f.exists()]
+    prompt    = build_prompt(prompt_file, *ctx_files)
 
-    if agent_cmd == "chief":
-        step(1, 3, "Writing chief PRD ...")
-        _write_chief_prd(build_prompt(prompt_file, *ctx_files))
+    chief_cmd = shutil.which("chief")
 
-        step(2, 3, "Running chief TUI ...")
-        _run_chief_tui(config)
+    if chief_cmd:
+        step(1, 2, "Writing chief PRD ...")
+        _write_chief_prd(prompt)
 
-        step(3, 3, "Validating chief output ...")
-        if not TASK_GRAPH_FILE.exists() and not TASKS_FILE.exists():
-            _build_task_graph_from_tasks_md()
-    else:
-        step(1, 2, "Building prompt ...")
-        prompt = build_prompt(prompt_file, *ctx_files)
+        # Clear stale task artifacts so the watcher doesn't fire immediately.
+        for _stale in [TASKS_FILE, TASK_GRAPH_FILE]:
+            if _stale.exists():
+                _stale.unlink()
 
-        step(2, 2, "Calling task creation agent ...")
-        agent_cfg  = config.get("agents", {}).get("task_creation", {})
-        command    = shutil.which(agent_cfg.get("command", "claude")) or agent_cfg.get("command", "claude")
-        extra_args = agent_cfg.get("args", [])
+        step(2, 2, "Running chief (suspending TUI) — will auto-start and auto-close ...")
+
+        if _RENDERER is not None:
+            _RENDERER.suspend()
+        try:
+            sys.stdout.write("\033[?25h\033[0m\033[2J\033[H")
+            sys.stdout.flush()
+            print("\033[1;96m  ── Chief Task Creation ──\033[0m")
+            print("\033[96m  Chief is starting — auto-pressing 's' in a moment.\033[0m\n")
+
+            proc = subprocess.Popen([chief_cmd, "--no-retry", "main"], cwd=str(REPO_ROOT))
+
+            # Auto-press 's' — chief is in the current terminal so SendKeys
+            # targets this window directly, no AppActivate needed.
+            def _send_s() -> None:
+                time.sleep(3)
+                if proc.poll() is None:
+                    subprocess.run(
+                        ["powershell", "-NoProfile", "-Command",
+                         "$s = New-Object -ComObject WScript.Shell; $s.SendKeys('s')"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+            threading.Thread(target=_send_s, daemon=True).start()
+
+            # Auto-close chief once TASKS.md is written.
+            def _watch_chief() -> None:
+                while proc.poll() is None:
+                    if validate_tasks_file(TASKS_FILE):
+                        time.sleep(2)
+                        _kill_tree(proc)
+                        return
+                    time.sleep(2)
+            threading.Thread(target=_watch_chief, daemon=True).start()
+
+            proc.wait()
+        finally:
+            # Chief's TUI may have left the terminal in alternate-screen mode
+            # with the cursor hidden. Hard-reset before Rich takes it back.
+            sys.stdout.write("\033[?1049l\033[?25h\033[0m\r\n")
+            sys.stdout.flush()
+            time.sleep(0.5)   # let the terminal settle
+            if _RENDERER is not None:
+                _RENDERER.resume()
+
+        # Emit TASKS.md content into AGENT.OUTPUT so it's visible.
+        if validate_tasks_file(TASKS_FILE):
+            for line in TASKS_FILE.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    _emit(AgentOutput(ts=_now_iso(), line=line, agent="Chief"))
+
+    # Validate chief output — fall back to Codex if TASKS.md is missing or invalid.
+    if not validate_tasks_file(TASKS_FILE):
+        if chief_cmd:
+            warn("Chief did not produce a valid TASKS.md. Falling back to Codex ...")
+        else:
+            info("Chief not found. Running Codex for task creation ...")
+
+        codex_bin = shutil.which("codex") or "codex"
         _, output = _run_agent_background(
-            [command] + extra_args + [prompt],
-            agent_name=agent_cmd or "Task Agent",
-            log_slug="task_creation",
+            [codex_bin],
+            agent_name="Codex (task creation)",
+            log_slug="task_creation_codex",
+            input_text=prompt,
         )
         if not output.strip():
-            raise RuntimeError("Task creation agent returned empty output.")
+            raise RuntimeError("Codex task creation returned empty output.")
         _parse_and_write_task_artifacts(output)
+
+        if not TASKS_FILE.exists():
+            TASKS_FILE.write_text(output, encoding="utf-8")
+
+    if TASKS_FILE.exists() and not TASK_GRAPH_FILE.exists():
+        _build_task_graph_from_tasks_md()
 
     if not validate_tasks_file(TASKS_FILE):
         raise RuntimeError("TASKS.md does not contain valid checkbox tasks.")

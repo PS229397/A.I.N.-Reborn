@@ -100,6 +100,10 @@ class RichRenderer:
         self._agent_scroll: int         = 0
         self._agent_name  : str         = ""
 
+        # ── Scroll focus & freeze ───────────────────────────────────────────
+        self._scroll_target: str  = "feed"   # "feed" | "agent"
+        self._frozen       : bool = False    # when True, live scroll is paused
+
         # ── Inline input ───────────────────────────────────────────────────
         self._input_pending: bool            = False
         self._input_prompt : str             = ""
@@ -107,10 +111,12 @@ class RichRenderer:
         self._input_event  : threading.Event = threading.Event()
 
         # ── Internals ──────────────────────────────────────────────────────
-        self._lock     : threading.Lock            = threading.Lock()
-        self._live     : Optional[Live]            = None
-        self._kb_thread: Optional[threading.Thread] = None
-        self._running  : bool                      = False
+        self._lock              : threading.Lock            = threading.Lock()
+        self._live              : Optional[Live]            = None
+        self._kb_thread         : Optional[threading.Thread] = None
+        self._running           : bool                      = False
+        self._kb_paused         : bool                      = False  # True while TUI is suspended
+        self._last_agent_refresh: float                     = 0.0  # throttle agent output redraws
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -155,6 +161,7 @@ class RichRenderer:
 
     def suspend(self) -> None:
         """Stop the Live display so a subprocess can own the terminal."""
+        self._kb_paused = True   # stop stealing keystrokes from the subprocess
         if self._live is not None:
             try:
                 self._live.stop()
@@ -178,6 +185,7 @@ class RichRenderer:
         except Exception:
             self._live = None
             return
+        self._kb_paused = False  # let the keyboard thread take input again
         self._refresh()
 
     def request_input(self, prompt: str) -> str:
@@ -221,6 +229,9 @@ class RichRenderer:
 
     def _kb_loop_windows(self, msvcrt: Any) -> None:
         while self._running:
+            if self._kb_paused:
+                time.sleep(0.05)
+                continue
             if msvcrt.kbhit():
                 ch = msvcrt.getch()
                 if ch in (b"\x00", b"\xe0"):   # extended key prefix
@@ -246,6 +257,9 @@ class RichRenderer:
             return
         try:
             while self._running:
+                if self._kb_paused:
+                    time.sleep(0.05)
+                    continue
                 if select.select([sys.stdin], [], [], 0.02)[0]:
                     ch = sys.stdin.buffer.read(1)
                     if ch == b"\x1b":
@@ -295,10 +309,30 @@ class RichRenderer:
                     self._input_buffer += char
                 self._refresh()
         else:
-            if char.lower() == "q":
+            k = char.lower()
+            if k == "q":
                 self._running = False
                 self.stop()
                 sys.exit(0)
+            elif k == "\t":          # Tab — switch scroll focus
+                with self._lock:
+                    self._scroll_target = "agent" if self._scroll_target == "feed" else "feed"
+                self._refresh()
+            elif k == "f":           # F — freeze / unfreeze live scroll
+                with self._lock:
+                    self._frozen = not self._frozen
+                self._refresh()
+            elif k == "r":           # R — jump back to live (bottom)
+                with self._lock:
+                    self._feed_scroll  = 0
+                    self._agent_scroll = 0
+                    self._frozen       = False
+                self._refresh()
+            elif k == "c":           # C — clear agent output panel
+                with self._lock:
+                    self._agent_output.clear()
+                    self._agent_scroll = 0
+                self._refresh()
 
     # ── Event handler ─────────────────────────────────────────────────────────
 
@@ -374,7 +408,14 @@ class RichRenderer:
                 t = Text()
                 t.append(event.line, style=C_PRIMARY)
                 self._agent_output.append(t)
-                self._agent_scroll = 0   # stay live
+                if not self._frozen:
+                    self._agent_scroll = 0   # stay live
+                # Throttle: redraw at most every 100 ms to avoid overwhelming Rich
+                now = time.monotonic()
+                if now - self._last_agent_refresh >= 0.1:
+                    self._last_agent_refresh = now
+                    self._refresh()
+                return  # skip the final self._refresh() below
 
             elif isinstance(event, AwaitingApproval):
                 t = Text()
@@ -568,15 +609,15 @@ class RichRenderer:
 
     def _render_footer(self) -> Panel:
         t = Text()
+        focus_label = "agent" if self._scroll_target == "agent" else "feed"
+        freeze_label = "unfreeze" if self._frozen else "freeze"
         shortcuts = [
-            ("Q",   "jack out"),
-            ("R",   "reboot"),
-            ("L",   "data feed"),
-            ("C",   "sys.config"),
-            ("S",   "density"),
-            ("?",   "help.sys"),
-            ("F",   "freeze"),
-            ("↑/↓", "scroll"),
+            ("Q",     "quit"),
+            ("Tab",   f"focus:{focus_label}"),
+            ("↑/↓",   "scroll"),
+            ("F",     freeze_label),
+            ("R",     "live"),
+            ("C",     "clear agent"),
         ]
         for i, (key, label) in enumerate(shortcuts):
             if i:
@@ -589,10 +630,16 @@ class RichRenderer:
 
     def scroll_up(self, lines: int = 3) -> None:
         with self._lock:
-            self._feed_scroll = min(self._feed_scroll + lines, MAX_FEED_LINES - 1)
+            if self._scroll_target == "agent":
+                self._agent_scroll = min(self._agent_scroll + lines, MAX_FEED_LINES - 1)
+            else:
+                self._feed_scroll = min(self._feed_scroll + lines, MAX_FEED_LINES - 1)
         self._refresh()
 
     def scroll_down(self, lines: int = 3) -> None:
         with self._lock:
-            self._feed_scroll = max(self._feed_scroll - lines, 0)
+            if self._scroll_target == "agent":
+                self._agent_scroll = max(self._agent_scroll - lines, 0)
+            else:
+                self._feed_scroll = max(self._feed_scroll - lines, 0)
         self._refresh()
