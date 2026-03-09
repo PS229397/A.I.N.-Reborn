@@ -646,30 +646,76 @@ def cycle_pipeline_mode(state: dict[str, Any], config: dict[str, Any]) -> dict[s
 def prompt_for_pipeline_mode(state: dict[str, Any], config: dict[str, Any]) -> str:
     available = get_available_pipeline_modes(config)
     current = get_selected_mode(state, config)
-
-    print()
-    print("  Select pipeline mode:")
-    for index, mode in enumerate(available, start=1):
-        details = get_mode_details(mode)
-        marker = " (current)" if mode == current else ""
-        print(f"    {index}. {details['label']} [{mode}] - {details['summary']}{marker}")
-    print(f"  Press Enter to keep {current}.")
-
-    try:
-        choice = input("  Mode: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
+    # Non-interactive fallback (CI, pipes): keep old numeric input behavior.
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print()
+        print("  Select pipeline mode:")
+        for index, mode in enumerate(available, start=1):
+            details = get_mode_details(mode)
+            marker = " (current)" if mode == current else ""
+            print(f"    {index}. {details['label']} [{mode}] - {details['summary']}{marker}")
+        print(f"  Press Enter to keep {current}.")
+        try:
+            choice = input("  Mode: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return current
+        if not choice:
+            return current
+        if choice.isdigit():
+            idx = int(choice) - 1
+            if 0 <= idx < len(available):
+                return available[idx]
+        if choice in available:
+            return choice
+        warn(f"Unknown mode '{choice}'. Keeping {current}.")
         return current
 
-    if not choice:
-        return current
-    if choice.isdigit():
-        idx = int(choice) - 1
-        if 0 <= idx < len(available):
-            return available[idx]
-    if choice in available:
-        return choice
-    warn(f"Unknown mode '{choice}'. Keeping {current}.")
-    return current
+    from rich.console import Console as RichConsole
+    from rich.panel import Panel
+    from rich.text import Text
+
+    console = RichConsole(legacy_windows=False)
+    rich_cyan = "#00e5ff"
+    rich_pink = "#ff2d78"
+    rich_dim = "dim #00e5ff"
+    selected = available.index(current) if current in available else 0
+
+    while True:
+        body = Text()
+        body.append("Select Pipeline Mode\n\n", style=f"bold {rich_cyan}")
+        for idx, mode in enumerate(available):
+            details = get_mode_details(mode)
+            cursor = "► " if idx == selected else "  "
+            cursor_style = f"bold {rich_pink}" if idx == selected else rich_dim
+            line_style = f"bold {rich_pink}" if idx == selected else rich_cyan
+            current_marker = " (current)" if mode == current else ""
+            body.append(cursor, style=cursor_style)
+            body.append(f"{details['label']} [{mode}]{current_marker}\n", style=line_style)
+            body.append(f"   {details['summary']}\n", style=rich_dim)
+        body.append("\n↑/↓ navigate • Enter select • Q keep current", style=rich_dim)
+
+        panel = Panel(
+            body,
+            title="A.I.N. MODE SELECTOR",
+            title_align="left",
+            border_style=rich_pink,
+            padding=(1, 2),
+        )
+        console.clear()
+        console.print()
+        console.print(panel)
+
+        key = _read_keypress()
+        if key == "up":
+            selected = (selected - 1) % len(available)
+        elif key == "down":
+            selected = (selected + 1) % len(available)
+        elif key == "enter":
+            console.clear()
+            return available[selected]
+        elif key == "quit":
+            console.clear()
+            return current
 
 # 
 # Command runner
@@ -1370,9 +1416,9 @@ def _collect_multiline_input(prompt_header: str) -> str:
         _RENDERER.suspend()
     try:
         width = 60
-        print(f"\n\033[1;91m{'' * width}\033[0m")
+        print(f"\n\033[1;91m{'-' * width}\033[0m")
         print(f"\033[1;91m  {prompt_header}\033[0m")
-        print(f"\033[1;91m{'' * width}\033[0m")
+        print(f"\033[1;91m{'-' * width}\033[0m")
         print(f"\033[96m  Type your description below.\033[0m")
         print(f"\033[96m  Enter \033[1m---\033[0m\033[96m on a new line to finish.\033[0m\n")
         lines: list[str] = []
@@ -1384,7 +1430,7 @@ def _collect_multiline_input(prompt_header: str) -> str:
                 lines.append(line)
         except (EOFError, KeyboardInterrupt):
             pass
-        print(f"\n\033[1;91m{'' * width}\033[0m\n")
+        print(f"\n\033[1;91m{'-' * width}\033[0m\n")
         return "\n".join(lines).strip()
     finally:
         if _RENDERER is not None:
@@ -1490,40 +1536,62 @@ def _read_keypress() -> str:
 
 
 def _render_task_review_popup(tasks: list[str], selected_row: int, decisions: list[bool]) -> None:
-    width = shutil.get_terminal_size((120, 40)).columns
-    bar = "" * min(max(width - 2, 40), 140)
-    header = "TASK REVIEW GATE"
-    print("\033[2J\033[H", end="")
-    print(f"{C.MAGENTA}{bar}{C.RESET}")
-    print(f"{C.MAGENTA}{C.BOLD}  {header}{C.RESET}")
-    print(f"{C.MAGENTA}{bar}{C.RESET}")
-    print(f"{C.CYAN}  Use / to select a task, / to toggle Accept/Deny, Enter to submit.{C.RESET}")
-    print()
+    from rich.console import Console as RichConsole
+    from rich.panel import Panel
+    from rich.text import Text
+
+    rich_cyan = "#00e5ff"
+    rich_pink = "#ff2d78"
+    rich_dim = "dim #00e5ff"
+
+    console = RichConsole(legacy_windows=False)
+    body = Text()
+    body.append("Review task list before implementation\n\n", style=f"bold {rich_cyan}")
 
     for idx, task in enumerate(tasks):
-        cursor = "" if idx == selected_row else " "
+        is_selected = idx == selected_row
+        cursor = "► " if is_selected else "  "
+        cursor_style = f"bold {rich_pink}" if is_selected else rich_dim
+        row_style = f"bold {rich_pink}" if is_selected else rich_cyan
         status = "ACCEPT" if decisions[idx] else "DENY"
-        status_color = C.CYAN if decisions[idx] else C.YELLOW
-        print(f" {cursor} {C.CYAN}{idx+1:02d}.{C.RESET} {task}")
-        print(f"    [{status_color}{status}{C.RESET}]")
+        status_style = rich_cyan if decisions[idx] else "yellow"
+        body.append(cursor, style=cursor_style)
+        body.append(f"{idx+1:02d}. {task}\n", style=row_style)
+        body.append("   [", style=rich_dim)
+        body.append(status, style=status_style)
+        body.append("]\n", style=rich_dim)
 
     denied = sum(1 for d in decisions if not d)
-    print()
+    body.append("\n", style=rich_dim)
     if denied == 0:
-        print(f" {C.GREEN}{C.BOLD}ENTER  Approve task list and continue to implementation{C.RESET}")
+        body.append("Enter approve and continue to implementation\n", style="bold green")
     else:
-        print(f" {C.YELLOW}{C.BOLD}ENTER  Deny task list ({denied} denied), provide feedback, and re-run planning/task creation{C.RESET}")
-    print(f" {C.MAGENTA}Q  quit pipeline run{C.RESET}")
+        body.append(
+            f"Enter deny ({denied} denied), provide feedback, and re-run planning/task creation\n",
+            style="bold yellow",
+        )
+    body.append("↑/↓ navigate • ←/→ toggle • Enter submit • Q keep current run state", style=rich_dim)
+
+    panel = Panel(
+        body,
+        title="A.I.N. TASK REVIEW",
+        title_align="left",
+        border_style=rich_pink,
+        padding=(1, 2),
+    )
+    console.clear()
+    console.print()
+    console.print(panel)
 
 
 def _review_tasks_with_popup(tasks: list[str]) -> tuple[bool, str]:
     """Interactive task review. Returns (approved, feedback)."""
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         print()
-        choice = input("  Approve generated tasks# [y/n]: ").strip().lower()
+        choice = input("  Approve generated tasks? [y/n]: ").strip().lower()
         if choice in ("y", "yes"):
             return True, ""
-        feedback = _collect_multiline_input("Task list denied  what should be different#")
+        feedback = _collect_multiline_input("Task list denied - what should be different?")
         return False, feedback
 
     decisions = [True] * len(tasks)
@@ -3345,13 +3413,32 @@ def _run_with_tui(
         renderer.subscribe(emitter)
         renderer.start()
         try:
-            run_pipeline(
-                start_stage=start_stage,
-                single_stage=single_stage,
-                emitter=emitter,
-                renderer=renderer,
-                mode="rich",
-            )
+            next_start_stage = start_stage
+            next_single_stage = single_stage
+            while True:
+                run_pipeline(
+                    start_stage=next_start_stage,
+                    single_stage=next_single_stage,
+                    emitter=emitter,
+                    renderer=renderer,
+                    mode="rich",
+                )
+
+                state = load_state(load_config())
+                if state.get("current_stage") != "done":
+                    break
+
+                choice = renderer.request_input(
+                    "SUCCESS: pipeline completed. [N] new AIN session, [Q] quit"
+                ).strip().lower()
+                if choice == "n":
+                    save_state(_default_state(load_config()))
+                    if PLANNING_APPROVED_FLAG.exists():
+                        PLANNING_APPROVED_FLAG.unlink()
+                    next_start_stage = None
+                    next_single_stage = False
+                    continue
+                break
         finally:
             renderer.stop()
 
