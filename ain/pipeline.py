@@ -5,8 +5,8 @@ A.I.N. Pipeline
 Multi-agent orchestrator for structured AI-assisted development.
 
 Workflow:
-    idle → scanning → architecture → planning_questions → planning_generation
-    → task_creation → waiting_approval → implementation → validation → done
+    idle -> scanning -> architecture -> planning_questions -> planning_generation
+    -> task_creation -> waiting_approval -> implementation -> validation -> done
 
 Usage (installed):
     ain init                  Scaffold .ai-pipeline/ into current repo
@@ -44,6 +44,7 @@ from typing import Any
 
 from ain.runtime.emitter import Emitter
 from ain.runtime.events import (
+    ApprovedEvent,
     ApprovalReceived,
     AwaitingApproval,
     LogLevel,
@@ -60,11 +61,12 @@ from ain.runtime.events import (
     TaskFailed,
     TaskStarted,
     AgentOutput,
+    WaitingApprovalEvent,
 )
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Helpers
-# ─────────────────────────────────────────────────────────────
+# 
 
 # Strips ANSI/VT escape sequences from agent output so they don't corrupt
 # Rich's Live display when embedded in Text objects.
@@ -74,9 +76,9 @@ def _strip_ansi(s: str) -> str:
     return _ANSI_ESC.sub("", s)
 
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Paths  (REPO_ROOT = cwd so the package works in any repo)
-# ─────────────────────────────────────────────────────────────
+# 
 
 REPO_ROOT     = Path.cwd()
 PIPELINE_DIR      = REPO_ROOT / ".ai-pipeline"
@@ -88,6 +90,7 @@ LOGS_DIR          = PIPELINE_DIR / "logs"
 APPROVALS_DIR     = PIPELINE_DIR / "approvals"
 USER_CONTEXT_FILE = PIPELINE_DIR / "user_context.md"
 BRAINSTORM_CONTEXT_FILE = PIPELINE_DIR / "brainstorm_context.md"
+TASK_REVIEW_FEEDBACK_FILE = PIPELINE_DIR / "task_review_feedback.md"
 DOCS_DIR      = REPO_ROOT / "docs"
 PIPELINE_LOG  = LOGS_DIR / "pipeline.log"
 
@@ -107,9 +110,9 @@ IMPLEMENTATION_LOG_FILE = DOCS_DIR / "IMPLEMENTATION_LOG.md"
 
 PLANNING_APPROVED_FLAG = APPROVALS_DIR / "planning_approved.flag"
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Stage definitions
-# ─────────────────────────────────────────────────────────────
+# 
 
 STAGES = [
     "idle",
@@ -132,8 +135,8 @@ STAGE_LABELS = {
     "scanning":            "Repository Scan",
     "architecture":        "Architecture Generation",
     "user_context":        "Feature Context",
-    "planning_questions":  "Planning — Brainstorm",
-    "planning_generation": "Planning — Generation",
+    "planning_questions":  "Planning - Brainstorm",
+    "planning_generation": "Planning - Generation",
     "task_creation":       "Task Creation",
     "waiting_approval":    "Waiting for Approval",
     "implementation":      "Implementation",
@@ -142,9 +145,9 @@ STAGE_LABELS = {
     "failed":              "Failed",
 }
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Validation rules
-# ─────────────────────────────────────────────────────────────
+# 
 
 ARCHITECTURE_HEADINGS = [
     "# System Overview", "# Tech Stack", "# Repo Structure",
@@ -193,9 +196,9 @@ PIPELINE_MODES: dict[str, dict[str, Any]] = {
     },
 }
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Default configuration
-# ─────────────────────────────────────────────────────────────
+# 
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "agents": {
@@ -219,7 +222,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "task_creation": {
             "command": "chief", "args": [], "model": "claude-sonnet-4-20250514",
-            "description": "Chief task orchestration engine — auto-installed by ain init",
+            "description": "Chief task orchestration engine  auto-installed by ain init",
         },
         "task_creation_codex": {
             "command": "codex", "args": ["exec"], "model": "gpt-5-codex",
@@ -269,18 +272,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
 }
 
-# ─────────────────────────────────────────────────────────────
+# 
 # UTF-8 output (Windows cp1252 can't render box-drawing chars)
-# ─────────────────────────────────────────────────────────────
+# 
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Terminal colors
-# ─────────────────────────────────────────────────────────────
+# 
 
 try:
     import colorama
@@ -315,39 +318,39 @@ def _emit_log(message: str, level: LogLevel) -> None:
 def banner(text: str) -> None:
     if _EMITTER is None:   # plain mode: print to terminal
         w = 62
-        print(f"\n{C.BOLD}{C.CYAN}{'─' * w}{C.RESET}")
+        print(f"\n{C.BOLD}{C.CYAN}{'-' * w}{C.RESET}")
         print(f"{C.BOLD}{C.CYAN}  {text}{C.RESET}")
-        print(f"{C.BOLD}{C.CYAN}{'─' * w}{C.RESET}\n")
-    _emit_log(f"━━━  {text}  ━━━", LogLevel.INFO)
+        print(f"{C.BOLD}{C.CYAN}{'-' * w}{C.RESET}\n")
+    _emit_log(f"===  {text}  ===", LogLevel.INFO)
 
 def info(text: str) -> None:
     if _EMITTER is None:
-        print(f"{C.BLUE}  ▸{C.RESET} {text}")
-    _emit_log(f"▸ {text}", LogLevel.INFO)
+        print(f"{C.BLUE}  >{C.RESET} {text}")
+    _emit_log(f"> {text}", LogLevel.INFO)
 
 def success(text: str) -> None:
     if _EMITTER is None:
-        print(f"{C.GREEN}  ✓{C.RESET} {text}")
-    _emit_log(f"✓ {text}", LogLevel.INFO)
+        print(f"{C.GREEN}  OK{C.RESET} {text}")
+    _emit_log(f"OK {text}", LogLevel.INFO)
 
 def warn(text: str) -> None:
     if _EMITTER is None:
-        print(f"{C.YELLOW}  ⚠{C.RESET} {text}")
-    _emit_log(f"⚠ {text}", LogLevel.WARN)
+        print(f"{C.YELLOW}  !{C.RESET} {text}")
+    _emit_log(f"! {text}", LogLevel.WARN)
 
 def error(text: str) -> None:
     if _EMITTER is None:
-        print(f"{C.RED}  ✗{C.RESET} {text}", file=sys.stderr)
-    _emit_log(f"✗ {text}", LogLevel.ERROR)
+        print(f"{C.RED}  X{C.RESET} {text}", file=sys.stderr)
+    _emit_log(f"X {text}", LogLevel.ERROR)
 
 def step(n: int, total: int, text: str) -> None:
     if _EMITTER is None:
         print(f"{C.BOLD}{C.WHITE}  [{n}/{total}]{C.RESET} {text}")
     _emit_log(f"[{n}/{total}] {text}", LogLevel.INFO)
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Event bus state
-# ─────────────────────────────────────────────────────────────
+# 
 
 _EMITTER: Emitter | None = None
 _RUN_ID: str = ""
@@ -360,6 +363,8 @@ _RENDERER: Any = None
 # Protects log-file writes and task-graph updates when tasks run in parallel.
 _LOG_LOCK    = threading.Lock()
 _GRAPH_LOCK  = threading.Lock()
+# Unblocks the waiting_approval gate when approval is granted in-process.
+_APPROVAL_EVENT = threading.Event()
 
 
 def _now_iso() -> str:
@@ -369,6 +374,14 @@ def _now_iso() -> str:
 def _emit(event: Any) -> None:
     if _EMITTER is not None:
         _EMITTER.emit(event)
+
+
+def _display_path(path: Path) -> str:
+    """Best-effort repo-relative display path for logs/UI."""
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
 
 
 def _tui_suspend() -> None:
@@ -389,9 +402,9 @@ def _tui_resume() -> None:
             pass
 
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Logging
-# ─────────────────────────────────────────────────────────────
+# 
 
 def _log(message: str, *, stage_id: str | None = None) -> None:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -401,9 +414,9 @@ def _log(message: str, *, stage_id: str | None = None) -> None:
             f.write(f"[{ts}] {message}\n")
     _emit(LogLine(ts=ts, level=LogLevel.INFO, source=LogSource.PIPELINE, stage_id=stage_id, message=message))
 
-# ─────────────────────────────────────────────────────────────
+# 
 # State management
-# ─────────────────────────────────────────────────────────────
+# 
 
 def _default_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
     selected_mode = (
@@ -423,6 +436,9 @@ def _default_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
         "notification_channel": {},
         "selected_mode": selected_mode,
         "mode_changed_at": None,
+        "status": "idle",
+        "run_id": None,
+        "last_approval_time": None,
     }
 
 
@@ -442,6 +458,12 @@ def load_state_with_backfill(
     merged["selected_mode"] = selected_mode
     if "mode_changed_at" not in merged:
         merged["mode_changed_at"] = None
+    if not merged.get("status"):
+        merged["status"] = merged.get("current_stage", "idle")
+    if "run_id" not in merged:
+        merged["run_id"] = None
+    if "last_approval_time" not in merged:
+        merged["last_approval_time"] = None
     return merged
 
 
@@ -475,10 +497,11 @@ def set_stage(stage: str, state: dict[str, Any] | None = None) -> dict[str, Any]
             completed.append(prev)
         state["completed_stages"] = completed
     state["current_stage"] = stage
+    state["status"] = stage
     if stage not in ("idle",) and not state.get("started_at"):
         state["started_at"] = datetime.now(timezone.utc).isoformat()
     save_state(state)
-    _log(f"Stage: {prev} → {stage}")
+    _log(f"Stage: {prev}  {stage}")
     return state
 
 
@@ -486,13 +509,14 @@ def fail_pipeline(state: dict[str, Any], reason: str) -> None:
     error(f"Pipeline failed: {reason}")
     _log(f"FAILED: {reason}")
     state["current_stage"] = FAILED
+    state["status"] = FAILED
     state["failure_reason"] = reason
     save_state(state)
     sys.exit(1)
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Config management
-# ─────────────────────────────────────────────────────────────
+# 
 
 def _deep_merge(base: dict, override: dict) -> dict:
     result = copy.deepcopy(base)
@@ -647,9 +671,9 @@ def prompt_for_pipeline_mode(state: dict[str, Any], config: dict[str, Any]) -> s
     warn(f"Unknown mode '{choice}'. Keeping {current}.")
     return current
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Command runner
-# ─────────────────────────────────────────────────────────────
+# 
 
 def run_command(
     cmd: list[str] | str,
@@ -692,9 +716,9 @@ def run_command_output(cmd: list[str] | str, cwd: Path | None = None) -> str:
         )
     return result.stdout.strip()
 
-# ─────────────────────────────────────────────────────────────
+# 
 # AI agent caller
-# ─────────────────────────────────────────────────────────────
+# 
 
 def call_agent(agent_name: str, prompt: str, config: dict) -> str:
     agent_cfg   = config["agents"].get(agent_name, {})
@@ -781,7 +805,7 @@ def _run_agent_background(
     input_text: str | None = None,
 ) -> tuple[int, str]:
     """Run an agent subprocess in the background, streaming its output to the TUI
-    agent panel via AgentOutput events. The TUI stays live — no suspend/resume.
+    agent panel via AgentOutput events. The TUI stays live  no suspend/resume.
 
     If *input_text* is provided it is written to stdin then stdin is closed,
     so the agent receives the prompt without blocking on the TUI keyboard thread.
@@ -833,7 +857,7 @@ def _run_agent_background(
         writer.join(timeout=5)
         proc.wait()
     else:
-        # No stdin — stream stdout live line by line.
+        # No stdin  stream stdout live line by line.
         def _reader() -> None:
             assert proc.stdout is not None
             for raw in proc.stdout:
@@ -859,7 +883,7 @@ def read_context_files(*files: Path) -> str:
             content = f.read_text(encoding="utf-8")
             parts.append(f"<!-- FILE: {f.name} -->\n{content}\n<!-- END: {f.name} -->")
         else:
-            parts.append(f"<!-- FILE: {f.name} — NOT FOUND -->")
+            parts.append(f"<!-- FILE: {f.name}  NOT FOUND -->")
     return "\n\n".join(parts)
 
 
@@ -872,9 +896,9 @@ def build_prompt(prompt_file: Path, *context_files: Path) -> str:
         prompt = f"{prompt}\n\n---\n## Context\n\n{ctx}"
     return prompt
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Validators
-# ─────────────────────────────────────────────────────────────
+# 
 
 def validate_headings(file: Path, required: list[str]) -> list[str]:
     if not file.exists():
@@ -903,9 +927,9 @@ def validate_task_graph(graph_file: Path) -> bool:
     except (json.JSONDecodeError, KeyError):
         return False
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Stage 1: Repository Scan
-# ─────────────────────────────────────────────────────────────
+# 
 
 def _build_tree(root: Path, ignore: set[str], prefix: str = "", depth: int = 0, max_depth: int = 6) -> list[str]:
     if depth > max_depth:
@@ -917,10 +941,10 @@ def _build_tree(root: Path, ignore: set[str], prefix: str = "", depth: int = 0, 
         return []
     visible = [e for e in entries if e.name not in ignore]
     for i, entry in enumerate(visible):
-        connector = "└── " if i == len(visible) - 1 else "├── "
+        connector = " " if i == len(visible) - 1 else " "
         lines.append(f"{prefix}{connector}{entry.name}")
         if entry.is_dir():
-            ext = "    " if i == len(visible) - 1 else "│   "
+            ext = "    " if i == len(visible) - 1 else "   "
             lines.extend(_build_tree(entry, ignore, prefix + ext, depth + 1, max_depth))
     return lines
 
@@ -1051,7 +1075,7 @@ def run_scan(state: dict, config: dict) -> None:
     step(1, 3, "Building repository tree ...")
     tree = scan_repo_tree(config)
     REPO_TREE_FILE.write_text(tree, encoding="utf-8")
-    success(f"Tree → {REPO_TREE_FILE.relative_to(REPO_ROOT)}")
+    success(f"Tree  {REPO_TREE_FILE.relative_to(REPO_ROOT)}")
 
     step(2, 3, "Scanning tracked files ...")
     tracked = scan_git_files()
@@ -1062,19 +1086,19 @@ def run_scan(state: dict, config: dict) -> None:
                    for p in REPO_ROOT.rglob("*")
                    if p.is_file() and not any(ig in p.parts for ig in ignore)]
     TRACKED_FILES_FILE.write_text("\n".join(tracked), encoding="utf-8")
-    success(f"{len(tracked)} files → {TRACKED_FILES_FILE.relative_to(REPO_ROOT)}")
+    success(f"{len(tracked)} files  {TRACKED_FILES_FILE.relative_to(REPO_ROOT)}")
 
     step(3, 3, "Generating repository summary ...")
     summary = generate_repo_summary(tree, tracked, config)
     REPO_SUMMARY_FILE.write_text(summary, encoding="utf-8")
-    success(f"Summary → {REPO_SUMMARY_FILE.relative_to(REPO_ROOT)}")
+    success(f"Summary  {REPO_SUMMARY_FILE.relative_to(REPO_ROOT)}")
 
     set_stage("architecture", state)
     success("Scan complete.")
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Stage 2: Architecture Generation (Gemini)
-# ─────────────────────────────────────────────────────────────
+# 
 
 def run_architecture(state: dict, config: dict) -> None:
     banner("Stage: Architecture Generation")
@@ -1083,7 +1107,7 @@ def run_architecture(state: dict, config: dict) -> None:
 
     step(1, 3, "Building prompt ...")
     prompt_instructions = (PROMPTS_DIR / "architecture_prompt.md").read_text(encoding="utf-8")
-    # Full prompt with embedded context — used by Codex fallback.
+    # Full prompt with embedded context  used by Codex fallback.
     full_prompt = build_prompt(
         PROMPTS_DIR / "architecture_prompt.md",
         REPO_TREE_FILE, REPO_SUMMARY_FILE, TRACKED_FILES_FILE,
@@ -1111,7 +1135,7 @@ def run_architecture(state: dict, config: dict) -> None:
         [resolved] + extra_args,
         agent_name="Gemini",
         log_slug="architecture",
-        input_text=full_prompt,  # embed context directly — .ai-pipeline/ may be gitignored
+        input_text=full_prompt,  # embed context directly  .ai-pipeline/ may be gitignored
     )
 
     # Gemini outputs to stdout (no write_file tool available via stdin mode).
@@ -1125,7 +1149,7 @@ def run_architecture(state: dict, config: dict) -> None:
         ).strip()
         if clean_output:
             ARCHITECTURE_FILE.write_text(clean_output, encoding="utf-8")
-            success(f"Written → {ARCHITECTURE_FILE.relative_to(REPO_ROOT)}")
+            success(f"Written  {ARCHITECTURE_FILE.relative_to(REPO_ROOT)}")
 
     if rc != 0 or not _gemini_ok():
         warn(f"Gemini {'exited with code ' + str(rc) if rc != 0 else 'did not produce a valid architecture.md'}.")
@@ -1161,18 +1185,18 @@ def run_architecture(state: dict, config: dict) -> None:
     success("Architecture validation passed.")
     set_stage("user_context", state)
 
-# ─────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────
+# 
+# 
 # Popup helpers
-# ─────────────────────────────────────────────────────────────
+# 
 
 USER_CONTEXT_TEMPLATE = """\
 # Feature / Bug Context
 
 Describe the feature you want to implement or the bug you want to fix.
-Be as specific as possible — this will guide the entire planning phase.
+Be as specific as possible  this will guide the entire planning phase.
 
-## What do you want to build or fix?
+## What do you want to build or fix#
 
 (Replace this text with your description)
 
@@ -1220,7 +1244,7 @@ def _open_popup_terminal(title: str, command: str) -> None:
         script = f'tell application "Terminal" to do script "{safe_cmd}"'
         subprocess.Popen(["osascript", "-e", script])
     else:
-        # Use list-form exec — no shell=True, no injection.
+        # Use list-form exec  no shell=True, no injection.
         for term_prefix in [
             ["gnome-terminal", "--"],
             ["xterm", "-e"],
@@ -1273,7 +1297,7 @@ def _run_interactive_in_tui(cmd: list[str]) -> None:
         # Drain all available output with a short poll.
         try:
             line = line_q.get(timeout=_POLL_MS)
-            if line is None:          # sentinel → process exited
+            if line is None:          # sentinel  process exited
                 return
             if line:
                 _emit_log(line, LogLevel.INFO)
@@ -1289,7 +1313,7 @@ def _run_interactive_in_tui(cmd: list[str]) -> None:
         if idle < _IDLE_SECS:
             continue                  # not idle yet
 
-        # ── Request input from the user ──────────────────────────
+        #  Request input from the user 
         if _RENDERER is not None and hasattr(_RENDERER, "request_input"):
             user_input = _RENDERER.request_input(
                 "Your response  (type 'done' to end session)"
@@ -1327,7 +1351,7 @@ def _run_suspended(cmd: list, title: str = "") -> int:
         _RENDERER.suspend()
     try:
         if title:
-            print(f"\n\033[1;96m  ── {title} ──\033[0m\n")
+            print(f"\n\033[1;96m   {title} \033[0m\n")
         result = subprocess.run(cmd, cwd=str(REPO_ROOT))
         return result.returncode
     finally:
@@ -1346,9 +1370,9 @@ def _collect_multiline_input(prompt_header: str) -> str:
         _RENDERER.suspend()
     try:
         width = 60
-        print(f"\n\033[1;91m{'─' * width}\033[0m")
+        print(f"\n\033[1;91m{'' * width}\033[0m")
         print(f"\033[1;91m  {prompt_header}\033[0m")
-        print(f"\033[1;91m{'─' * width}\033[0m")
+        print(f"\033[1;91m{'' * width}\033[0m")
         print(f"\033[96m  Type your description below.\033[0m")
         print(f"\033[96m  Enter \033[1m---\033[0m\033[96m on a new line to finish.\033[0m\n")
         lines: list[str] = []
@@ -1360,7 +1384,7 @@ def _collect_multiline_input(prompt_header: str) -> str:
                 lines.append(line)
         except (EOFError, KeyboardInterrupt):
             pass
-        print(f"\n\033[1;91m{'─' * width}\033[0m\n")
+        print(f"\n\033[1;91m{'' * width}\033[0m\n")
         return "\n".join(lines).strip()
     finally:
         if _RENDERER is not None:
@@ -1376,20 +1400,176 @@ def _wait_for_user(prompt: str) -> None:
     # Plain/fallback mode: standard terminal input.
     print()
     try:
-        input(f"  {prompt} → ")
+        input(f"  {prompt}  ")
     except (EOFError, KeyboardInterrupt):
         warn("Interrupted.")
         sys.exit(0)
 
 
-# ─────────────────────────────────────────────────────────────
+def _extract_tasks_for_review() -> list[str]:
+    """Load task descriptions from TASK_GRAPH.json, with TASKS.md fallback."""
+    if TASK_GRAPH_FILE.exists():
+        try:
+            data = json.loads(TASK_GRAPH_FILE.read_text(encoding="utf-8"))
+            tasks = [
+                str(t.get("description", "")).strip()
+                for t in data.get("tasks", [])
+                if str(t.get("description", "")).strip()
+            ]
+            if tasks:
+                return tasks
+        except Exception:
+            pass
+
+    if TASKS_FILE.exists():
+        tasks: list[str] = []
+        for line in TASKS_FILE.read_text(encoding="utf-8").splitlines():
+            s = line.strip()
+            if s.startswith("- [ ] ") or s.startswith("- [x] "):
+                tasks.append(s[6:].strip())
+        if tasks:
+            return tasks
+
+    return []
+
+
+def _read_keypress() -> str:
+    """Read a single keypress and normalize to up/down/left/right/enter/quit/other."""
+    try:
+        import msvcrt  # type: ignore
+
+        while True:
+            ch = msvcrt.getch()
+            if ch in (b"\x00", b"\xe0"):
+                ch2 = msvcrt.getch()
+                if ch2 == b"H":
+                    return "up"
+                if ch2 == b"P":
+                    return "down"
+                if ch2 == b"K":
+                    return "left"
+                if ch2 == b"M":
+                    return "right"
+                return "other"
+            if ch in (b"\r", b"\n"):
+                return "enter"
+            if ch in (b"q", b"Q", b"\x03"):
+                return "quit"
+            return "other"
+    except ImportError:
+        import select
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            while True:
+                if not select.select([sys.stdin], [], [], 0.1)[0]:
+                    continue
+                ch = sys.stdin.buffer.read(1)
+                if ch in (b"\r", b"\n"):
+                    return "enter"
+                if ch == b"\x1b":
+                    seq = sys.stdin.buffer.read(2)
+                    if seq == b"[A":
+                        return "up"
+                    if seq == b"[B":
+                        return "down"
+                    if seq == b"[D":
+                        return "left"
+                    if seq == b"[C":
+                        return "right"
+                    return "other"
+                if ch in (b"q", b"Q", b"\x03"):
+                    return "quit"
+                return "other"
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _render_task_review_popup(tasks: list[str], selected_row: int, decisions: list[bool]) -> None:
+    width = shutil.get_terminal_size((120, 40)).columns
+    bar = "" * min(max(width - 2, 40), 140)
+    header = "TASK REVIEW GATE"
+    print("\033[2J\033[H", end="")
+    print(f"{C.MAGENTA}{bar}{C.RESET}")
+    print(f"{C.MAGENTA}{C.BOLD}  {header}{C.RESET}")
+    print(f"{C.MAGENTA}{bar}{C.RESET}")
+    print(f"{C.CYAN}  Use / to select a task, / to toggle Accept/Deny, Enter to submit.{C.RESET}")
+    print()
+
+    for idx, task in enumerate(tasks):
+        cursor = "" if idx == selected_row else " "
+        status = "ACCEPT" if decisions[idx] else "DENY"
+        status_color = C.CYAN if decisions[idx] else C.YELLOW
+        print(f" {cursor} {C.CYAN}{idx+1:02d}.{C.RESET} {task}")
+        print(f"    [{status_color}{status}{C.RESET}]")
+
+    denied = sum(1 for d in decisions if not d)
+    print()
+    if denied == 0:
+        print(f" {C.GREEN}{C.BOLD}ENTER  Approve task list and continue to implementation{C.RESET}")
+    else:
+        print(f" {C.YELLOW}{C.BOLD}ENTER  Deny task list ({denied} denied), provide feedback, and re-run planning/task creation{C.RESET}")
+    print(f" {C.MAGENTA}Q  quit pipeline run{C.RESET}")
+
+
+def _review_tasks_with_popup(tasks: list[str]) -> tuple[bool, str]:
+    """Interactive task review. Returns (approved, feedback)."""
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print()
+        choice = input("  Approve generated tasks# [y/n]: ").strip().lower()
+        if choice in ("y", "yes"):
+            return True, ""
+        feedback = _collect_multiline_input("Task list denied  what should be different#")
+        return False, feedback
+
+    decisions = [True] * len(tasks)
+    selected_row = 0
+
+    while True:
+        _render_task_review_popup(tasks, selected_row, decisions)
+        key = _read_keypress()
+        if key == "up":
+            selected_row = max(0, selected_row - 1)
+        elif key == "down":
+            selected_row = min(len(tasks) - 1, selected_row + 1)
+        elif key in ("left", "right"):
+            decisions[selected_row] = not decisions[selected_row]
+        elif key == "enter":
+            approved = all(decisions)
+            print("\033[2J\033[H", end="")
+            if approved:
+                return True, ""
+            feedback = _collect_multiline_input("Task list denied  what should be different#")
+            return False, feedback
+        elif key == "quit":
+            raise KeyboardInterrupt
+
+
+def _rerun_planning_and_task_creation(state: dict[str, Any], config: dict[str, Any], feedback: str) -> dict[str, Any]:
+    TASK_REVIEW_FEEDBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TASK_REVIEW_FEEDBACK_FILE.write_text(feedback.strip(), encoding="utf-8")
+    info("Task list denied. Re-running planning generation and task creation with your feedback.")
+
+    state = set_stage("planning_generation", state)
+    run_planning_generation(state, config)
+    state = load_state(config)
+
+    run_task_creation(state, config)
+    return load_state(config)
+
+
+# 
 # Stage: Feature Context
-# ─────────────────────────────────────────────────────────────
+# 
 
 def run_user_context(state: dict, config: dict) -> None:
     banner("Stage: Feature Context")
 
-    content = _collect_multiline_input("A.I.N. — Describe the feature or bug")
+    content = _collect_multiline_input("A.I.N. - Describe the feature or bug")
     if not content:
         warn("No description provided. Please re-run and describe your feature.")
         sys.exit(0)
@@ -1401,10 +1581,10 @@ def run_user_context(state: dict, config: dict) -> None:
 
 
 # Stage 3: Planning Questions (Codex)
-# ─────────────────────────────────────────────────────────────
+# 
 
 def run_planning_questions(state: dict, config: dict) -> None:
-    banner("Stage: Planning — Brainstorm (Codex)")
+    banner("Stage: Planning  Brainstorm (Codex)")
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Brief pause so the TUI can fully settle after the user_context
@@ -1429,7 +1609,7 @@ def run_planning_questions(state: dict, config: dict) -> None:
         f"When we reach full clarity, write a clean Q&A summary to {out_path}."
     )
 
-    info("Suspending TUI — starting Codex brainstorm session ...")
+    info("Suspending TUI  starting Codex brainstorm session ...")
     info(f"Context: {BRAINSTORM_CONTEXT_FILE.relative_to(REPO_ROOT)}")
     info(f"Codex will auto-close once it writes {OPEN_QUESTIONS_FILE.name}.")
 
@@ -1437,9 +1617,9 @@ def run_planning_questions(state: dict, config: dict) -> None:
         _RENDERER.suspend()
     try:
         # Fully reset terminal state so Codex's TUI starts clean.
-        sys.stdout.write("\033[?25h\033[0m\033[2J\033[H")
+        sys.stdout.write("\033[#25h\033[0m\033[2J\033[H")
         sys.stdout.flush()
-        print(f"\033[1;96m  ── Codex Brainstorm Session ──\033[0m")
+        print(f"\033[1;96m   Codex Brainstorm Session \033[0m")
         print(f"\033[96m  Codex will ask clarifying questions.")
         print(f"  Press \033[1mEnter\033[0m\033[96m in Codex to confirm the prompt and start.\033[0m\n")
         proc = subprocess.Popen(
@@ -1460,7 +1640,7 @@ def run_planning_questions(state: dict, config: dict) -> None:
         watcher.start()
         proc.wait()
     finally:
-        sys.stdout.write("\033[?1049l\033[?25h\033[0m\r\n")
+        sys.stdout.write("\033[#1049l\033[#25h\033[0m\r\n")
         sys.stdout.flush()
         time.sleep(0.5)
         if _RENDERER is not None:
@@ -1475,18 +1655,18 @@ def run_planning_questions(state: dict, config: dict) -> None:
     set_stage("planning_generation", state)
 
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Stage 4: Planning Generation (Codex)
-# ─────────────────────────────────────────────────────────────
+# 
 
 def _planning_direct_write_prompt() -> str:
     return (
         "Read .ai-pipeline/user_context.md, docs/OPEN_QUESTIONS.md, and docs/architecture.md "
-        "to understand the feature request. Write three planning documents directly to disk — "
+        "to understand the feature request. Write three planning documents directly to disk  "
         "do NOT print them, write the files: docs/PRD.md (headings: # Problem, # Goals, "
         "# Non Goals, # User Stories, # Success Criteria), docs/DESIGN.md (headings: "
         "# Architecture Changes, # Data Model, # API Changes, # UI Changes, # Risks), "
-        "docs/FEATURE_SPEC.md (detailed technical spec). Do not ask questions — generate all "
+        "docs/FEATURE_SPEC.md (detailed technical spec). Do not ask questions  generate all "
         "three files now."
     )
 
@@ -1542,14 +1722,14 @@ def _run_suspended_agent(cmd: list[str], title: str, watch_files: list[Path]) ->
     if _RENDERER is not None:
         _RENDERER.suspend()
     try:
-        sys.stdout.write("\033[?25h\033[0m\033[2J\033[H")
+        sys.stdout.write("\033[#25h\033[0m\033[2J\033[H")
         sys.stdout.flush()
-        print(f"\033[1;96m  ── {title} ──\033[0m\n")
+        print(f"\033[1;96m   {title} \033[0m\n")
         proc = subprocess.Popen(cmd, cwd=str(REPO_ROOT))
         threading.Thread(target=_watch_for_files, args=(proc, watch_files), daemon=True).start()
         proc.wait()
     finally:
-        sys.stdout.write("\033[?1049l\033[?25h\033[0m\r\n")
+        sys.stdout.write("\033[#1049l\033[#25h\033[0m\r\n")
         sys.stdout.flush()
         time.sleep(0.5)
         if _RENDERER is not None:
@@ -1596,14 +1776,14 @@ def _run_planning_with_chief(prompt: str, config: dict[str, Any]) -> bool:
     _write_chief_planning_package(prompt)
     plan_docs = _clear_plan_docs()
     cmd = _resolve_agent_command("planning_chief", config) + ["--no-retry", "main"]
-    info("Suspending TUI — running Chief for planning generation ...")
+    info("Suspending TUI  running Chief for planning generation ...")
     return _run_suspended_agent(cmd, "Planning Generation (Chief)", plan_docs)
 
 
 def _run_planning_fallback_claude(prompt: str) -> None:
     claude_bin = shutil.which("claude")
     if not claude_bin:
-        warn("claude not found — no further planning fallback available.")
+        warn("claude not found  no further planning fallback available.")
         return
     _, output = _run_agent_background(
         [claude_bin, "--print"],
@@ -1618,7 +1798,7 @@ def _run_planning_fallback_claude(prompt: str) -> None:
 def run_planning_generation(state: dict, config: dict) -> None:
     mode = get_selected_mode(state, config)
     agent_key = resolve_stage_agent_key("planning_generation", state, config)
-    banner(f"Stage: Planning — Generation [mode={mode} agent={agent_key}]")
+    banner(f"Stage: Planning  Generation [mode={mode} agent={agent_key}]")
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
     prompt_file = PROMPTS_DIR / "planning_generation_prompt.md"
@@ -1626,6 +1806,7 @@ def run_planning_generation(state: dict, config: dict) -> None:
         f for f in [
             OPEN_QUESTIONS_FILE, OPEN_ANSWERS_FILE,
             ARCHITECTURE_FILE, USER_CONTEXT_FILE,
+            TASK_REVIEW_FEEDBACK_FILE,
         ] if f.exists()
     ]
     prompt = build_prompt(prompt_file, *ctx_files)
@@ -1646,14 +1827,14 @@ def run_planning_generation(state: dict, config: dict) -> None:
     else:
         raise RuntimeError(f"Unsupported planning mode '{mode}'.")
 
-    # ── Write stubs for any still-missing files ─────────────────────────────────
+    #  Write stubs for any still-missing files 
     for doc, headings, name in [
         (PRD_FILE,          PRD_HEADINGS,    "PRD.md"),
         (DESIGN_FILE,       DESIGN_HEADINGS, "DESIGN.md"),
         (FEATURE_SPEC_FILE, [],              "FEATURE_SPEC.md"),
     ]:
         if not doc.exists():
-            warn(f"{name} not found — creating stub. Edit it before continuing.")
+            warn(f"{name} not found  creating stub. Edit it before continuing.")
             stub = "\n\n".join(f"{h}\n\n(Fill in)" for h in headings) if headings else "# Feature Specification\n\n(Fill in)"
             doc.write_text(stub, encoding="utf-8")
 
@@ -1709,7 +1890,7 @@ def _parse_and_write_planning_docs(output: str) -> None:
                 warn(str(e))
                 continue
             target.write_text(_strip_fences(m.group(2)), encoding="utf-8")
-            success(f"Written → {target.relative_to(REPO_ROOT)}")
+            success(f"Written  {_display_path(target)}")
     else:
         warn("Could not parse separate files. Writing raw output to PRD.md.")
         PRD_FILE.write_text(output, encoding="utf-8")
@@ -1721,9 +1902,9 @@ def _parse_and_write_planning_docs(output: str) -> None:
         if not FEATURE_SPEC_FILE.exists():
             FEATURE_SPEC_FILE.write_text("# Feature Specification\n\n", encoding="utf-8")
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Stage 5: Task Creation (Chief)
-# ─────────────────────────────────────────────────────────────
+# 
 
 CHIEF_DIR      = REPO_ROOT / ".chief"
 CHIEF_PRDS_DIR = CHIEF_DIR / "prds" / "main"
@@ -1738,8 +1919,8 @@ def _write_chief_prd(prompt: str) -> None:
     prd_md = (
         "# Task Creation Context\n\n"
         "Read the planning documents below and produce two files:\n\n"
-        "- Write `docs/TASKS.md` — a dependency-ordered markdown checkbox task list\n"
-        "- Write `docs/TASK_GRAPH.json` — a JSON dependency graph\n\n"
+        "- Write `docs/TASKS.md`  a dependency-ordered markdown checkbox task list\n"
+        "- Write `docs/TASK_GRAPH.json`  a JSON dependency graph\n\n"
         "Write the files directly to disk using your file-editing tools.\n"
         "Do NOT output file markers or print the content to stdout.\n\n"
         "---\n\n"
@@ -1788,8 +1969,8 @@ def _write_chief_prd(prompt: str) -> None:
         ],
     }
     CHIEF_PRD_FILE.write_text(json.dumps(prd, indent=2), encoding="utf-8")
-    success(f"Written → {CHIEF_PRD_FILE.relative_to(REPO_ROOT)}")
-    success(f"Written → {CHIEF_PRD_MD.relative_to(REPO_ROOT)}")
+    success(f"Written  {CHIEF_PRD_FILE.relative_to(REPO_ROOT)}")
+    success(f"Written  {CHIEF_PRD_MD.relative_to(REPO_ROOT)}")
 
 
 def _build_task_graph_from_tasks_md() -> None:
@@ -1839,6 +2020,45 @@ def _run_chief_background(config: dict) -> tuple[bool, str]:
     return True, output
 
 
+def _call_agent_live(agent_name: str, prompt: str, config: dict, *, log_slug: str) -> str:
+    """Run an agent while streaming output into AGENT.OUTPUT, then return captured text."""
+    agent_cfg = config.get("agents", {}).get(agent_name, {})
+    command = agent_cfg.get("command", agent_name)
+    extra_args = agent_cfg.get("args", [])
+    model = agent_cfg.get("model")
+    prompt_mode = agent_cfg.get("prompt_mode", "stdin")
+
+    resolved = shutil.which(command)
+    if resolved:
+        command = resolved
+
+    cmd = [command] + extra_args
+    if model:
+        cmd += ["--model", model]
+
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    (LOGS_DIR / f"{agent_name}_last_prompt.txt").write_text(prompt, encoding="utf-8")
+
+    display = _agent_display_name(agent_name, config)
+    if prompt_mode == "arg":
+        rc, output = _run_agent_background(
+            cmd + [prompt],
+            agent_name=display,
+            log_slug=log_slug,
+        )
+    else:
+        rc, output = _run_agent_background(
+            cmd,
+            agent_name=display,
+            log_slug=log_slug,
+            input_text=prompt,
+        )
+
+    if rc != 0:
+        warn(f"Agent {agent_name} exited {rc}")
+    return output
+
+
 def _persist_stage_fallback(
     stage_name: str,
     state: dict[str, Any],
@@ -1868,11 +2088,26 @@ def run_task_creation(state: dict, config: dict) -> None:
     if not prompt_file.exists():
         raise RuntimeError(f"Missing prompt: {prompt_file}")
 
-    ctx_files = [f for f in [PRD_FILE, DESIGN_FILE, FEATURE_SPEC_FILE, ARCHITECTURE_FILE] if f.exists()]
-    prompt    = build_prompt(prompt_file, *ctx_files)
+    ctx_files = [
+        f
+        for f in [
+            PRD_FILE,
+            DESIGN_FILE,
+            FEATURE_SPEC_FILE,
+            ARCHITECTURE_FILE,
+            TASK_REVIEW_FEEDBACK_FILE,
+        ]
+        if f.exists()
+    ]
+    prompt = build_prompt(prompt_file, *ctx_files)
+    live_task_output = _EMITTER is not None
 
     if mode == "codex_only":
-        output = call_agent(agent_key, prompt, config)
+        output = (
+            _call_agent_live(agent_key, prompt, config, log_slug="task_creation")
+            if live_task_output
+            else call_agent(agent_key, prompt, config)
+        )
         if not output.strip():
             raise RuntimeError("Codex task creation returned empty output.")
         _parse_and_write_task_artifacts(output)
@@ -1881,69 +2116,99 @@ def run_task_creation(state: dict, config: dict) -> None:
     else:
         chief_cfg = config.get("agents", {}).get(agent_key, {})
         chief_cmd_name = chief_cfg.get("command", "chief")
-        chief_cmd = shutil.which(chief_cmd_name)
+        chief_cmd = shutil.which(chief_cmd_name) if str(chief_cmd_name).lower() == "chief" else None
+        primary_error: RuntimeError | None = None
 
         if chief_cmd:
             step(1, 2, "Writing chief PRD ...")
             _write_chief_prd(prompt)
-
             for _stale in [TASKS_FILE, TASK_GRAPH_FILE]:
                 if _stale.exists():
                     _stale.unlink()
 
-            step(2, 2, "Running chief (suspending TUI) — will auto-start and auto-close ...")
-
-            if _RENDERER is not None:
-                _RENDERER.suspend()
-            try:
-                sys.stdout.write("\033[?25h\033[0m\033[2J\033[H")
-                sys.stdout.flush()
-                print("\033[1;96m  ── Chief Task Creation ──\033[0m")
-                print("\033[96m  Chief is starting — auto-pressing 's' in a moment.\033[0m\n")
-
-                proc = subprocess.Popen([chief_cmd] + chief_cfg.get("args", []) + ["--no-retry", "main"], cwd=str(REPO_ROOT))
-
-                def _send_s() -> None:
-                    time.sleep(3)
-                    if proc.poll() is None:
-                        subprocess.run(
-                            ["powershell", "-NoProfile", "-Command",
-                             "$s = New-Object -ComObject WScript.Shell; $s.SendKeys('s')"],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        )
-                threading.Thread(target=_send_s, daemon=True).start()
-
-                def _watch_chief() -> None:
-                    while proc.poll() is None:
-                        if validate_tasks_file(TASKS_FILE):
-                            time.sleep(2)
-                            _kill_tree(proc)
-                            return
-                        time.sleep(2)
-                threading.Thread(target=_watch_chief, daemon=True).start()
-
-                proc.wait()
-            finally:
-                sys.stdout.write("\033[?1049l\033[?25h\033[0m\r\n")
-                sys.stdout.flush()
-                time.sleep(0.5)
+            if live_task_output:
+                step(2, 2, "Running chief in background (streaming to AGENT.OUTPUT) ...")
+                _run_chief_background(config)
+            else:
+                step(2, 2, "Running chief (suspending TUI) - will auto-start and auto-close ...")
                 if _RENDERER is not None:
-                    _RENDERER.resume()
+                    _RENDERER.suspend()
+                try:
+                    sys.stdout.write("\033[#25h\033[0m\033[2J\033[H")
+                    sys.stdout.flush()
+                    print("\033[1;96m  Chief Task Creation\033[0m")
+                    print("\033[96m  Chief is starting - auto-pressing 's' in a moment.\033[0m\n")
+                    proc = subprocess.Popen(
+                        [chief_cmd] + chief_cfg.get("args", []) + ["--no-retry", "main"],
+                        cwd=str(REPO_ROOT),
+                    )
 
-            if validate_tasks_file(TASKS_FILE):
-                for line in TASKS_FILE.read_text(encoding="utf-8").splitlines():
-                    if line.strip():
-                        _emit(AgentOutput(ts=_now_iso(), line=line, agent="Chief"))
+                    def _send_s() -> None:
+                        time.sleep(3)
+                        if proc.poll() is None:
+                            subprocess.run(
+                                [
+                                    "powershell",
+                                    "-NoProfile",
+                                    "-Command",
+                                    "$s = New-Object -ComObject WScript.Shell; $s.SendKeys('s')",
+                                ],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                            )
+
+                    threading.Thread(target=_send_s, daemon=True).start()
+
+                    def _watch_chief() -> None:
+                        while proc.poll() is None:
+                            if validate_tasks_file(TASKS_FILE):
+                                time.sleep(2)
+                                _kill_tree(proc)
+                                return
+                            time.sleep(2)
+
+                    threading.Thread(target=_watch_chief, daemon=True).start()
+                    proc.wait()
+                finally:
+                    sys.stdout.write("\033[#1049l\033[#25h\033[0m\r\n")
+                    sys.stdout.flush()
+                    time.sleep(0.5)
+                    if _RENDERER is not None:
+                        _RENDERER.resume()
+
+                if validate_tasks_file(TASKS_FILE):
+                    for line in TASKS_FILE.read_text(encoding="utf-8").splitlines():
+                        if line.strip():
+                            _emit(AgentOutput(ts=_now_iso(), line=line, agent="Chief"))
+        else:
+            try:
+                output = (
+                    _call_agent_live(agent_key, prompt, config, log_slug="task_creation")
+                    if live_task_output
+                    else call_agent(agent_key, prompt, config)
+                )
+                if output.strip():
+                    _parse_and_write_task_artifacts(output)
+                    if not TASKS_FILE.exists():
+                        TASKS_FILE.write_text(output, encoding="utf-8")
+            except RuntimeError as e:
+                primary_error = e
 
         if not validate_tasks_file(TASKS_FILE):
             if mode == "claude_chief_only":
                 raise RuntimeError("Chief did not produce a valid TASKS.md in claude_chief_only mode.")
+            if primary_error is not None:
+                warn(f"Primary task creation agent failed ({primary_error}). Falling back to Codex ...")
             if chief_cmd:
                 warn("Chief did not produce a valid TASKS.md. Falling back to Codex ...")
             else:
                 info("Chief not found. Running Codex for task creation ...")
             _persist_stage_fallback("task_creation", state, config)
-            output = call_agent("task_creation_codex", prompt, config)
+            output = (
+                _call_agent_live("task_creation_codex", prompt, config, log_slug="task_creation_fallback")
+                if live_task_output
+                else call_agent("task_creation_codex", prompt, config)
+            )
             if not output.strip():
                 raise RuntimeError("Codex task creation returned empty output.")
             _parse_and_write_task_artifacts(output)
@@ -1958,12 +2223,10 @@ def run_task_creation(state: dict, config: dict) -> None:
     if not validate_task_graph(TASK_GRAPH_FILE):
         raise RuntimeError("TASK_GRAPH.json is invalid or empty.")
 
-    data  = json.loads(TASK_GRAPH_FILE.read_text(encoding="utf-8"))
+    data = json.loads(TASK_GRAPH_FILE.read_text(encoding="utf-8"))
     count = len(data.get("tasks", []))
     success(f"Task graph: {count} tasks created.")
     set_stage("waiting_approval", state)
-
-
 def _parse_and_write_task_artifacts(output: str) -> None:
     pattern = re.compile(
         r"<!--\s*FILE:\s*(?:docs/)?(\S+?)\s*-->(.*?)<!--\s*END:\s*(?:docs/)?\S+?\s*-->",
@@ -1985,7 +2248,7 @@ def _parse_and_write_task_artifacts(output: str) -> None:
                 except json.JSONDecodeError:
                     pass
             target.write_text(content, encoding="utf-8")
-            success(f"Written → {target.relative_to(REPO_ROOT)}")
+            success(f"Written  {_display_path(target)}")
     else:
         json_match = re.search(r"```json\s*(.*?)\s*```", output, re.DOTALL)
         if json_match:
@@ -2004,9 +2267,9 @@ def _parse_and_write_task_artifacts(output: str) -> None:
         _build_task_graph_from_tasks_md()
 
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Stage 6: Approval Gate
-# ─────────────────────────────────────────────────────────────
+# 
 
 def run_waiting_approval(state: dict, config: dict) -> None:
     banner("Stage: Waiting for Approval")
@@ -2016,24 +2279,49 @@ def run_waiting_approval(state: dict, config: dict) -> None:
         set_stage("implementation", state)
         return
 
-    _emit(AwaitingApproval(run_id=_RUN_ID, stage_id="waiting_approval"))
-    info("Task creation completed. Pipeline is paused at the approval gate, not crashed.")
+    while True:
+        _emit(AwaitingApproval(run_id=_RUN_ID, stage_id="waiting_approval"))
+        info("Task creation completed. Review tasks before implementation continues.")
 
-    print(f"\n{C.BOLD}{C.YELLOW}  APPROVAL REQUIRED{C.RESET}")
-    print()
-    print("  Review these artifacts before implementation begins:")
-    print()
-    for doc in [ARCHITECTURE_FILE, PRD_FILE, DESIGN_FILE, FEATURE_SPEC_FILE, TASKS_FILE, TASK_GRAPH_FILE]:
-        if doc.exists():
-            print(f"    {C.CYAN}{doc.relative_to(REPO_ROOT)}{C.RESET}")
-    print()
-    print(f"  Approve with:  {C.GREEN}ain --approve{C.RESET}")
-    print()
-    sys.exit(0)
+        tasks = _extract_tasks_for_review()
+        if not tasks:
+            warn("No tasks found to review. Falling back to manual approval flow.")
+            print(f"\n{C.BOLD}{C.YELLOW}  APPROVAL REQUIRED{C.RESET}")
+            print()
+            print("  Review these artifacts before implementation begins:")
+            print()
+            for doc in [ARCHITECTURE_FILE, PRD_FILE, DESIGN_FILE, FEATURE_SPEC_FILE, TASKS_FILE, TASK_GRAPH_FILE]:
+                if doc.exists():
+                    print(f"    {C.CYAN}{doc.relative_to(REPO_ROOT)}{C.RESET}")
+            print()
+            print(f"  Approve with:  {C.GREEN}ain --approve{C.RESET}")
+            print()
+            sys.exit(0)
 
-# ─────────────────────────────────────────────────────────────
+        if _RENDERER is not None:
+            _RENDERER.suspend()
+        try:
+            approved, feedback = _review_tasks_with_popup(tasks)
+        finally:
+            if _RENDERER is not None:
+                _RENDERER.resume()
+
+        if approved:
+            APPROVALS_DIR.mkdir(parents=True, exist_ok=True)
+            approved_at = datetime.now(timezone.utc).isoformat()
+            PLANNING_APPROVED_FLAG.write_text(f"Approved: {approved_at}\n", encoding="utf-8")
+            _emit(ApprovalReceived(run_id=_RUN_ID, actor="user", at=approved_at))
+            success("Tasks approved. Advancing to implementation.")
+            set_stage("implementation", state)
+            if TASK_REVIEW_FEEDBACK_FILE.exists():
+                TASK_REVIEW_FEEDBACK_FILE.unlink()
+            return
+
+        state = _rerun_planning_and_task_creation(state, config, feedback)
+
+# 
 # Git integration
-# ─────────────────────────────────────────────────────────────
+# 
 
 def create_git_branch(state: dict, config: dict) -> str | None:
     if not config["git"]["auto_branch"]:
@@ -2066,6 +2354,14 @@ def commit_implementation(state: dict, config: dict) -> None:
             info("No changes to commit.")
             return
         run_command(["git", "add", "."])
+        # Respect .gitignore for generated docs even if they were tracked earlier.
+        task_graph_rel = str(TASK_GRAPH_FILE.relative_to(REPO_ROOT)).replace("\\", "/")
+        ignored_probe = run_command(
+            ["git", "check-ignore", "--no-index", task_graph_rel],
+            capture=True,
+        )
+        if ignored_probe.returncode == 0:
+            run_command(["git", "reset", "HEAD", "--", task_graph_rel], capture=True)
         msg = (
             f"feat: AI pipeline implementation\n\n"
             f"Generated by A.I.N. Pipeline\n"
@@ -2077,9 +2373,9 @@ def commit_implementation(state: dict, config: dict) -> None:
         warn(f"Git commit failed: {e}")
 
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Workspace cleanup
-# ─────────────────────────────────────────────────────────────
+# 
 
 def _clean_files() -> list[Path]:
     return [
@@ -2137,9 +2433,9 @@ def clean_workspace(silent: bool = False) -> None:
             info("Nothing to clean.")
         success("Workspace cleaned. Ready for next implementation.")
 
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 # Token-limit fallback helpers
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 
 _TOKEN_LIMIT_PHRASES = [
     "context window", "token limit", "maximum context", "too long",
@@ -2258,7 +2554,7 @@ def _call_agent_with_fallback(
         warn(f"Agent {agent_name} exited {result.returncode}")
         _log(f"AGENT STDERR: {stderr[:500]}")
 
-        # Exit code 1 (token exhaustion or any error) — auto-trigger codex fallback
+        # Exit code 1 (token exhaustion or any error)  auto-trigger codex fallback
         info("Auto-switching to codex fallback ...")
         rolled = rollback_implementation_files()
         if rolled:
@@ -2270,9 +2566,9 @@ def _call_agent_with_fallback(
     return output
 
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Parallel task execution helpers
-# ─────────────────────────────────────────────────────────────
+# 
 
 def _build_task_prompt(task: dict, prompt_file: Path) -> str:
     """Construct the full prompt for a single task."""
@@ -2308,7 +2604,7 @@ def _run_one_task(
         agent=agent_name,
         started_at=_now_iso(),
     ))
-    info(f"  ▸ Task {task_id}: {description}")
+    info(f"   Task {task_id}: {description}")
 
     t0 = datetime.now(timezone.utc)
     try:
@@ -2325,7 +2621,7 @@ def _run_one_task(
             duration_ms=duration_ms,
             ended_at=_now_iso(),
         ))
-        success(f"  ✓ Task {task_id} complete ({duration_ms // 1000}s)")
+        success(f"   Task {task_id} complete ({duration_ms // 1000}s)")
 
         with _GRAPH_LOCK:
             for t in task_data["tasks"]:
@@ -2352,7 +2648,7 @@ def _run_one_task(
             error=str(e),
             ended_at=_now_iso(),
         ))
-        error(f"  ✗ Task {task_id} failed: {e}")
+        error(f"   Task {task_id} failed: {e}")
         _log(f"Task {task_id} failed: {e}")
         log_lines.append(f"## Task {task_id}: {description}")
         log_lines.append(f"Status: FAILED")
@@ -2416,9 +2712,9 @@ def _execute_parallel_groups(
         )
 
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Stage 7: Implementation (Claude)
-# ─────────────────────────────────────────────────────────────
+# 
 
 def run_implementation(state: dict, config: dict) -> None:
     mode = get_selected_mode(state, config)
@@ -2456,10 +2752,10 @@ def run_implementation(state: dict, config: dict) -> None:
 
     parallel_groups = task_data.get("parallel_groups", [])
     if parallel_groups:
-        info(f"Parallel groups detected ({len(parallel_groups)} groups) — running concurrently.")
+        info(f"Parallel groups detected ({len(parallel_groups)} groups)  running concurrently.")
         _execute_parallel_groups(task_data, prompt_file, state, config, log_lines)
     else:
-        # No parallel groups — run sequentially via the shared helper.
+        # No parallel groups  run sequentially via the shared helper.
         dep_statuses = {t["id"]: t["status"] for t in tasks}
         for task in pending:
             blocked = [d for d in task.get("depends_on", [])
@@ -2471,7 +2767,7 @@ def run_implementation(state: dict, config: dict) -> None:
             dep_statuses[task["id"]] = "completed" if succeeded else "failed"
 
     IMPLEMENTATION_LOG_FILE.write_text("\n".join(log_lines), encoding="utf-8")
-    success(f"Log → {IMPLEMENTATION_LOG_FILE.relative_to(REPO_ROOT)}")
+    success(f"Log  {IMPLEMENTATION_LOG_FILE.relative_to(REPO_ROOT)}")
     set_stage("validation", state)
 
 
@@ -2484,9 +2780,9 @@ def _mark_task_complete_in_md(description: str) -> None:
         new = re.sub(r"- \[ \] " + snippet, "- [x] " + description[:60], content, count=1)
         TASKS_FILE.write_text(new, encoding="utf-8")
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Stage 8: Validation
-# ─────────────────────────────────────────────────────────────
+# 
 
 def detect_validation_commands(tracked_files: list[str]) -> list[list[str]]:
     files_set = set(tracked_files)
@@ -2570,7 +2866,7 @@ def run_validation(state: dict, config: dict) -> None:
 
     val_log = LOGS_DIR / "validation.log"
     val_log.write_text("\n".join(log_lines), encoding="utf-8")
-    success(f"Log → {val_log.relative_to(REPO_ROOT)}")
+    success(f"Log  {val_log.relative_to(REPO_ROOT)}")
 
     if not all_passed:
         raise RuntimeError("Validation failed. See .ai-pipeline/logs/validation.log")
@@ -2584,18 +2880,18 @@ def run_validation(state: dict, config: dict) -> None:
         banner("Cleaning workspace for next run")
         clean_workspace()
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Agent CLI installation
-# ─────────────────────────────────────────────────────────────
+# 
 
-# Maps CLI command name → npm package to install if missing
+# Maps CLI command name  npm package to install if missing
 AGENT_NPM_PACKAGES: dict[str, str] = {
     "gemini": "@google/gemini-cli",
     "codex":  "@openai/codex",
     "claude": "@anthropic-ai/claude-code",
 }
 
-# Maps CLI command name → curl install script URL
+# Maps CLI command name  curl install script URL
 AGENT_CURL_INSTALLS: dict[str, str] = {
     "chief": "https://raw.githubusercontent.com/minicodemonkey/chief/main/install.sh",
 }
@@ -2603,12 +2899,12 @@ AGENT_CURL_INSTALLS: dict[str, str] = {
 
 def _install_via_npm(command: str, pkg: str) -> bool:
     """Install an npm package globally. Returns True on success."""
-    info(f"{command} — not found, installing {pkg} ...")
+    info(f"{command}  not found, installing {pkg} ...")
     result = run_command(["npm", "install", "-g", pkg], capture=True, timeout=120)
     if result.returncode == 0:
-        success(f"{command} — installed")
+        success(f"{command}  installed")
         return True
-    error(f"{command} — installation failed")
+    error(f"{command}  installation failed")
     warn(f"  Manual install: npm install -g {pkg}")
     if result.stderr:
         warn(f"  {result.stderr.strip()[:200]}")
@@ -2618,22 +2914,22 @@ def _install_via_npm(command: str, pkg: str) -> bool:
 def _install_via_curl(command: str, url: str) -> bool:
     """Install via a remote shell script. Returns True on success.
 
-    Downloads the script first, then pipes it to bash — avoids ``shell=True``
+    Downloads the script first, then pipes it to bash  avoids ``shell=True``
     with a raw URL interpolated into a command string.
     """
-    info(f"{command} — not found, installing via install script ...")
+    info(f"{command}  not found, installing via install script ...")
     if not shutil.which("curl"):
-        error(f"{command} — curl not found, cannot run install script")
+        error(f"{command}  curl not found, cannot run install script")
         warn(f"  Manual install: curl -fsSL {url} | bash")
         return False
     if not shutil.which("bash"):
-        error(f"{command} — bash not found, cannot run install script")
+        error(f"{command}  bash not found, cannot run install script")
         warn(f"  Manual install: curl -fsSL {url} | bash")
         return False
     try:
         fetch = run_command(["curl", "-fsSL", url], capture=True, timeout=30)
         if fetch.returncode != 0:
-            error(f"{command} — download failed (exit {fetch.returncode})")
+            error(f"{command}  download failed (exit {fetch.returncode})")
             warn(f"  Manual install: curl -fsSL {url} | bash")
             return False
         install = subprocess.run(
@@ -2647,13 +2943,13 @@ def _install_via_curl(command: str, url: str) -> bool:
             env={**os.environ},
         )
         if install.returncode == 0:
-            success(f"{command} — installed")
+            success(f"{command}  installed")
             return True
-        error(f"{command} — installation failed (exit {install.returncode})")
+        error(f"{command}  installation failed (exit {install.returncode})")
         warn(f"  Manual install: curl -fsSL {url} | bash")
         return False
     except subprocess.TimeoutExpired:
-        error(f"{command} — installation timed out")
+        error(f"{command}  installation timed out")
         return False
 
 
@@ -2664,7 +2960,7 @@ def install_agents(config: dict) -> None:
 
     has_npm = bool(shutil.which("npm"))
     if not has_npm:
-        warn("npm not found — npm-based agents cannot be auto-installed.")
+        warn("npm not found  npm-based agents cannot be auto-installed.")
         warn("Install Node.js from https://nodejs.org then re-run ain init")
 
     agents   = config.get("agents", {})
@@ -2678,7 +2974,7 @@ def install_agents(config: dict) -> None:
         seen.add(command)
 
         if shutil.which(command):
-            success(f"{command} ({stage}) — already installed")
+            success(f"{command} ({stage})  already installed")
         elif command in AGENT_CURL_INSTALLS:
             any_missing = True
             _install_via_curl(command, AGENT_CURL_INSTALLS[command])
@@ -2687,23 +2983,23 @@ def install_agents(config: dict) -> None:
             if has_npm:
                 _install_via_npm(command, AGENT_NPM_PACKAGES[command])
             else:
-                warn(f"{command} — skipped (npm not available)")
+                warn(f"{command}  skipped (npm not available)")
         else:
-            warn(f"{command} ({stage}) — not found and no auto-install configured")
+            warn(f"{command} ({stage})  not found and no auto-install configured")
             warn(f"  Install it manually and ensure it is on your PATH")
 
     if not any_missing:
         success("All agents available.")
 
 
-# ─────────────────────────────────────────────────────────────
-# ain init — scaffold pipeline into current repo
-# ─────────────────────────────────────────────────────────────
+# 
+# ain init  scaffold pipeline into current repo
+# 
 
 def run_init() -> None:
     from importlib.resources import files as res_files
 
-    banner("A.I.N. Pipeline — Init")
+    banner("A.I.N. Pipeline - Init")
 
     for d in [PIPELINE_DIR, SCAN_DIR, PROMPTS_DIR, LOGS_DIR, APPROVALS_DIR, DOCS_DIR]:
         d.mkdir(parents=True, exist_ok=True)
@@ -2745,12 +3041,12 @@ def run_init() -> None:
     info(f"Edit {CONFIG_FILE.relative_to(REPO_ROOT)} to configure your agents.")
     info("Then run: ain run")
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Status display
-# ─────────────────────────────────────────────────────────────
+# 
 
 def show_status(state: dict) -> None:
-    banner("A.I.N. Pipeline — Status")
+    banner("A.I.N. Pipeline - Status")
     current   = state.get("current_stage", "unknown")
     completed = state.get("completed_stages", [])
     mode = get_selected_mode(state, load_config())
@@ -2770,11 +3066,11 @@ def show_status(state: dict) -> None:
         if stage == "idle":
             continue
         if stage in completed:
-            icon = f"{C.GREEN}✓{C.RESET}"
+            icon = f"{C.GREEN}{C.RESET}"
         elif stage == current:
-            icon = f"{C.YELLOW}▶{C.RESET}"
+            icon = f"{C.YELLOW}{C.RESET}"
         else:
-            icon = f"{C.DIM}○{C.RESET}"
+            icon = f"{C.DIM}{C.RESET}"
         print(f"    {icon}  {STAGE_LABELS.get(stage, stage)}")
 
     if TASK_GRAPH_FILE.exists():
@@ -2785,9 +3081,9 @@ def show_status(state: dict) -> None:
             pass
     print()
 
-# ─────────────────────────────────────────────────────────────
+# 
 # Orchestrator
-# ─────────────────────────────────────────────────────────────
+# 
 
 STAGE_RUNNERS = {
     "scanning":            run_scan,
@@ -2817,6 +3113,11 @@ def run_pipeline(
     ensure_config()
     config = load_config()
     state  = load_state(config)
+    _APPROVAL_EVENT.clear()
+    state["run_id"] = _RUN_ID
+    if not state.get("status") or state.get("status") == "idle":
+        state["status"] = "running"
+    save_state(state)
 
     if renderer is not None and hasattr(renderer, "configure_mode_controls"):
         def _cycle_mode_from_tui() -> dict[str, str]:
@@ -2895,14 +3196,14 @@ def run_pipeline(
         show_status(state)
         _emit(RunCompleted(run_id=_RUN_ID, ended_at=_now_iso(), status=RunStatus.DONE))
 
-# ─────────────────────────────────────────────────────────────
+# 
 # CLI
-# ─────────────────────────────────────────────────────────────
+# 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="ain",
-        description="A.I.N. Pipeline — multi-agent AI development orchestrator",
+        description="A.I.N. Pipeline - multi-agent AI development orchestrator",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=dedent("""\
             Examples:
@@ -2957,7 +3258,7 @@ def main() -> None:
         return
 
     if args.clean:
-        banner("A.I.N. Pipeline — Clean")
+        banner("A.I.N. Pipeline - Clean")
         clean_workspace()
         return
 
@@ -3014,7 +3315,7 @@ def main() -> None:
         _run_with_tui(start_stage=stage)
         return
 
-    # No subcommand and no flag — show help
+    # No subcommand and no flag  show help
     parser.print_help()
 
 
@@ -3034,7 +3335,7 @@ def _run_with_tui(
         from rich.console import Console as _Console
         from ain import __version__ as _ver
 
-        # Use Rich's own terminal detection — more reliable than sys.stdout.isatty()
+        # Use Rich's own terminal detection  more reliable than sys.stdout.isatty()
         if not _Console().is_terminal:
             run_pipeline(start_stage=start_stage, single_stage=single_stage, mode="plain")
             return
@@ -3055,9 +3356,10 @@ def _run_with_tui(
             renderer.stop()
 
     except Exception:
-        # Any TUI failure — fall back to plain output
+        # Any TUI failure  fall back to plain output
         run_pipeline(start_stage=start_stage, single_stage=single_stage, mode="plain")
 
 
 if __name__ == "__main__":
     main()
+

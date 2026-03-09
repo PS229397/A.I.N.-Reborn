@@ -128,3 +128,17 @@ class ApprovalReceived:
     run_id: str
     actor:  str
     at:     str
+
+
+@dataclass
+class WaitingApprovalEvent:
+    """Emitted when the pipeline enters the waiting-for-approval gate."""
+
+    run_id: str
+
+
+@dataclass
+class ApprovedEvent:
+    """Emitted when a run has been approved and can resume."""
+
+    run_id: str

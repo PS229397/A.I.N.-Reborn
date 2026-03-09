@@ -31,7 +31,7 @@ from ain.runtime.events import (
     RunStatus,
 )
 
-# ── Colour constants ──────────────────────────────────────────────────────────
+# -- Colour constants ----------------------------------------------------------
 
 C_PRIMARY  = "#00e5ff"       # text, stage names, feed messages
 C_ACCENT   = "#ff2d78"       # titles, keys, separators, active highlights
@@ -47,7 +47,7 @@ C_BORDER   = "dim #ff2d78"
 MAX_FEED_LINES = 500
 
 
-# ── Stage state ───────────────────────────────────────────────────────────────
+# -- Stage state ---------------------------------------------------------------
 
 class _StageState:
     __slots__ = ("stage_id", "name", "status")
@@ -58,15 +58,14 @@ class _StageState:
         self.status   = "queued"   # queued | running | done | failed
 
 
-# ── Renderer ──────────────────────────────────────────────────────────────────
+# -- Renderer ------------------------------------------------------------------
 
 class RichRenderer:
     """Full-screen Rich TUI.
 
     - Clears the terminal on start (screen=True).
-    - Keyboard thread handles ↑/↓ scroll, printable input, Enter, Q/Ctrl-C quit.
-    - request_input() blocks in-place; the TUI keeps refreshing while the user
-      types — no suspend/resume needed.
+    - Keyboard thread handles ↑/↓ scroll and shortcut keys.
+    - request_input() suspends the TUI and reads from terminal input().
     """
 
     def __init__(self, version: str = "0.1.8") -> None:
@@ -79,38 +78,32 @@ class RichRenderer:
             except Exception:
                 pass
 
-        # legacy_windows=False → VT/ANSI output; avoids cp1252 encode errors
+        # legacy_windows=False -> VT/ANSI output; avoids cp1252 encode errors
         self._console = Console(legacy_windows=False)
 
-        # ── Run state ──────────────────────────────────────────────────────
+        # -- Run state ------------------------------------------------------
         self._run_id     : str   = "--------"
         self._status     : str   = "IDLE"
         self._start_mono : float = time.monotonic()
 
-        # ── Stage deck ─────────────────────────────────────────────────────
+        # -- Stage deck -----------------------------------------------------
         self._stages   : List[_StageState]      = []
         self._stage_map: Dict[str, _StageState] = {}
 
-        # ── Data feed ──────────────────────────────────────────────────────
+        # -- Data feed ------------------------------------------------------
         self._feed        : Deque[Text] = collections.deque(maxlen=MAX_FEED_LINES)
         self._feed_scroll : int         = 0   # lines hidden from bottom (0 = live)
 
-        # ── Agent output ────────────────────────────────────────────────────
+        # -- Agent output ----------------------------------------------------
         self._agent_output: Deque[Text] = collections.deque(maxlen=MAX_FEED_LINES)
         self._agent_scroll: int         = 0
         self._agent_name  : str         = ""
 
-        # ── Scroll focus & freeze ───────────────────────────────────────────
+        # -- Scroll focus & freeze -------------------------------------------
         self._scroll_target: str  = "feed"   # "feed" | "agent"
         self._frozen       : bool = False    # when True, live scroll is paused
 
-        # ── Inline input ───────────────────────────────────────────────────
-        self._input_pending: bool            = False
-        self._input_prompt : str             = ""
-        self._input_buffer : str             = ""
-        self._input_event  : threading.Event = threading.Event()
-
-        # ── Internals ──────────────────────────────────────────────────────
+        # -- Internals ------------------------------------------------------
         self._lock              : threading.Lock            = threading.Lock()
         self._live              : Optional[Live]            = None
         self._kb_thread         : Optional[threading.Thread] = None
@@ -124,7 +117,7 @@ class RichRenderer:
         }
         self._cycle_mode_cb     : Any                       = None
 
-    # ── Public API ────────────────────────────────────────────────────────────
+    # -- Public API ------------------------------------------------------------
 
     def subscribe(self, emitter: Any) -> None:
         emitter.subscribe(self._handle_event)
@@ -142,7 +135,7 @@ class RichRenderer:
             self._build_layout(),
             console=self._console,
             refresh_per_second=8,
-            screen=True,   # ← takes over the full terminal, clears on start/stop
+            screen=True,   # takes over the full terminal, clears on start/stop
         )
         self._live.start()
 
@@ -156,8 +149,6 @@ class RichRenderer:
     def stop(self) -> None:
         """End the Live display and restore the terminal."""
         self._running = False
-        # Unblock any waiting request_input
-        self._input_event.set()
         if self._live is not None:
             try:
                 self._live.stop()
@@ -195,26 +186,16 @@ class RichRenderer:
         self._refresh()
 
     def request_input(self, prompt: str) -> str:
-        """Show *prompt* in the INPUT panel and wait for the user to press Enter.
-
-        The TUI keeps refreshing while the user types.
-        """
-        with self._lock:
-            self._input_pending = True
-            self._input_prompt  = prompt
-            self._input_buffer  = ""
-        self._input_event.clear()
-        self._refresh()
-
-        self._input_event.wait()   # released by _handle_char on Enter / stop()
-
-        with self._lock:
-            result              = self._input_buffer
-            self._input_pending = False
-            self._input_prompt  = ""
-            self._input_buffer  = ""
-        self._refresh()
-        return result
+        """Suspend TUI, collect one line in terminal, then resume."""
+        self.suspend()
+        try:
+            print()
+            print(f"  {prompt}")
+            return input("  > ")
+        except (EOFError, KeyboardInterrupt):
+            return ""
+        finally:
+            self.resume()
 
     def configure_mode_controls(self, mode_details: Dict[str, str], cycle_callback: Any) -> None:
         with self._lock:
@@ -222,7 +203,7 @@ class RichRenderer:
             self._cycle_mode_cb = cycle_callback
         self._refresh()
 
-    # ── Tick thread (keeps UPTIME live) ──────────────────────────────────────
+    # -- Tick thread (keeps UPTIME live) --------------------------------------
 
     def _tick_loop(self) -> None:
         while self._running:
@@ -230,7 +211,7 @@ class RichRenderer:
             if self._running:
                 self._refresh()
 
-    # ── Keyboard thread ───────────────────────────────────────────────────────
+    # -- Keyboard thread -------------------------------------------------------
 
     def _kb_loop(self) -> None:
         try:
@@ -293,34 +274,13 @@ class RichRenderer:
             self.stop()
             sys.exit(0)
 
-        in_input = self._input_pending
-
-        # Enter
-        if ch in (b"\r", b"\n"):
-            if in_input:
-                self._input_event.set()
-            return
-
-        # Backspace
-        if ch in (b"\x08", b"\x7f"):
-            if in_input:
-                with self._lock:
-                    self._input_buffer = self._input_buffer[:-1]
-                self._refresh()
-            return
-
         # Printable character
         try:
             char = ch.decode("utf-8", errors="replace")
         except Exception:
             return
 
-        if in_input:
-            if char.isprintable():
-                with self._lock:
-                    self._input_buffer += char
-                self._refresh()
-        else:
+        if char.isprintable():
             k = char.lower()
             if k == "q":
                 self._running = False
@@ -358,7 +318,7 @@ class RichRenderer:
                         self._mode_details = dict(details)
                     self._refresh()
 
-    # ── Event handler ─────────────────────────────────────────────────────────
+    # -- Event handler ---------------------------------------------------------
 
     def _handle_event(self, event: Any) -> None:
         with self._lock:
@@ -449,7 +409,7 @@ class RichRenderer:
 
         self._refresh()
 
-    # ── Rendering ─────────────────────────────────────────────────────────────
+    # -- Rendering -------------------------------------------------------------
 
     def _refresh(self) -> None:
         if self._live is not None:
@@ -462,8 +422,8 @@ class RichRenderer:
         ts = event.ts[11:19] if len(event.ts) >= 19 else event.ts
         level_style = {LogLevel.WARN: C_WRN, LogLevel.ERROR: C_ERR}.get(event.level, C_ACCENT)
         level_tag   = {LogLevel.INFO: "INF", LogLevel.WARN: "WRN", LogLevel.ERROR: "ERR"}.get(event.level, "INF")
-        # Stage banner lines (━━━ … ━━━) get accent colour; normal text is cyan
-        msg_style = C_ACCENT if event.message.startswith("━━━") else C_PRIMARY
+        # Stage banner lines (=== ... ===) get accent colour; normal text is cyan.
+        msg_style = C_ACCENT if event.message.startswith("===") else C_PRIMARY
         t = Text()
         t.append(ts,               style=f"dim {C_PRIMARY}")
         t.append(" ")
@@ -482,18 +442,28 @@ class RichRenderer:
     def _node(self) -> str:
         return (self._run_id[:8] if len(self._run_id) >= 8 else self._run_id).ljust(8, "-")
 
-    # ── Layout builders ───────────────────────────────────────────────────────
+    # -- Layout builders -------------------------------------------------------
 
     def _build_layout(self) -> Layout:
         root = Layout(name="root")
         root.split_column(
-            Layout(name="header",      size=3),
+            Layout(name="top_pad", size=1),
+            Layout(name="mid"),
+            Layout(name="bottom_pad", size=1),
+        )
+        root["mid"].split_row(
+            Layout(name="left_pad", size=2),
+            Layout(name="content"),
+            Layout(name="right_pad", size=2),
+        )
+        root["content"].split_column(
+            Layout(name="header", size=3),
             Layout(name="body"),
-            Layout(name="input_panel", size=5),
-            Layout(name="footer",      size=4),
+            Layout(name="footer", size=4),
         )
         root["body"].split_row(
             Layout(name="deck",  ratio=1),
+            Layout(name="deck_gap", size=1),
             Layout(name="right", ratio=3),
         )
         root["right"].split_column(
@@ -504,8 +474,13 @@ class RichRenderer:
         root["deck"].update(self._render_deck())
         root["feed"].update(self._render_feed())
         root["agent_output"].update(self._render_agent_output())
-        root["input_panel"].update(self._render_input())
         root["footer"].update(self._render_footer())
+        # Keep spacer layouts visually empty (no debug/placeholder markings).
+        root["top_pad"].update("")
+        root["bottom_pad"].update("")
+        root["left_pad"].update("")
+        root["right_pad"].update("")
+        root["deck_gap"].update("")
         return root
 
     def _render_header(self) -> Panel:
@@ -554,9 +529,9 @@ class RichRenderer:
     def _panel_lines(self) -> int:
         """Approximate number of content lines available in each half-height panel."""
         h = self._console.size.height
-        # header(3) + input(5) + footer(3) + borders ≈ 13 overhead
+        # top/bottom inset + header/footer + internal gaps and borders
         # body splits right pane into feed + agent_output (ratio 1:1)
-        return max(5, (h - 13) // 2 - 2)
+        return max(5, (h - 14) // 2 - 2)
 
     def _render_feed(self) -> Panel:
         lines = list(self._feed)
@@ -607,30 +582,6 @@ class RichRenderer:
             padding=(0, 1),
         )
 
-    def _render_input(self) -> Panel:
-        # Read snapshot without lock (display-only; slight race is harmless)
-        pending = self._input_pending
-        prompt  = self._input_prompt
-        buf     = self._input_buffer
-
-        if pending:
-            body = Text()
-            body.append(f"▸ {prompt}\n\n", style=f"bold {C_PRIMARY}")
-            body.append(f"> {buf}",         style=f"bold {C_PRIMARY}")
-            body.append("█",               style=f"bold {C_ACCENT}")
-            return Panel(
-                body,
-                title=Text("// INPUT.AWAITING", style=f"bold {C_ACCENT}"),
-                border_style=f"bold {C_ACCENT}",
-                padding=(1, 2),
-            )
-        return Panel(
-            Text("Idle. No input requested.", style=f"dim {C_PRIMARY}"),
-            title=Text("// INPUT.IDLE", style=C_ACCENT),
-            border_style=C_ACCENT,
-            padding=(1, 2),
-        )
-
     def _render_footer(self) -> Panel:
         t = Text()
         focus_label = "agent" if self._scroll_target == "agent" else "feed"
@@ -656,7 +607,7 @@ class RichRenderer:
         t.append(self._mode_details.get("summary", ""), style=C_PRIMARY)
         return Panel(t, border_style=C_ACCENT, padding=(0, 1))
 
-    # ── Scroll helpers ────────────────────────────────────────────────────────
+    # -- Scroll helpers --------------------------------------------------------
 
     def scroll_up(self, lines: int = 3) -> None:
         with self._lock:
