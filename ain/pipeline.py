@@ -898,6 +898,57 @@ def _run_interactive_in_tui(cmd: list[str]) -> None:
         last_output = time.monotonic()  # reset idle clock after sending input
 
 
+def _run_suspended(cmd: list, title: str = "") -> int:
+    """Suspend the TUI, run *cmd* raw in the terminal, then resume the TUI.
+
+    The subprocess inherits stdin/stdout/stderr so interactive CLI tools
+    (codex, editors, etc.) work exactly as if launched normally.
+    Returns the subprocess exit code.
+    """
+    if _RENDERER is not None:
+        _RENDERER.suspend()
+    try:
+        if title:
+            print(f"\n\033[1;96m  ── {title} ──\033[0m\n")
+        result = subprocess.run(cmd, cwd=str(REPO_ROOT))
+        return result.returncode
+    finally:
+        if _RENDERER is not None:
+            _RENDERER.resume()
+
+
+def _collect_multiline_input(prompt_header: str) -> str:
+    """Suspend TUI, collect multi-line input from the user, resume TUI.
+
+    The user types their text and submits by entering '---' on a blank line
+    or pressing Ctrl+D / Ctrl+Z.
+    Returns the collected text (stripped).
+    """
+    if _RENDERER is not None:
+        _RENDERER.suspend()
+    try:
+        width = 60
+        print(f"\n\033[1;91m{'─' * width}\033[0m")
+        print(f"\033[1;91m  {prompt_header}\033[0m")
+        print(f"\033[1;91m{'─' * width}\033[0m")
+        print(f"\033[96m  Type your description below.\033[0m")
+        print(f"\033[96m  Enter \033[1m---\033[0m\033[96m on a new line to finish.\033[0m\n")
+        lines: list[str] = []
+        try:
+            while True:
+                line = input()
+                if line.strip() == "---":
+                    break
+                lines.append(line)
+        except (EOFError, KeyboardInterrupt):
+            pass
+        print(f"\n\033[1;91m{'─' * width}\033[0m\n")
+        return "\n".join(lines).strip()
+    finally:
+        if _RENDERER is not None:
+            _RENDERER.resume()
+
+
 def _wait_for_user(prompt: str) -> None:
     """Block until the user acknowledges.  In TUI mode the input panel is used;
     in plain mode a regular input() call is made."""
@@ -920,25 +971,13 @@ def _wait_for_user(prompt: str) -> None:
 def run_user_context(state: dict, config: dict) -> None:
     banner("Stage: Feature Context")
 
-    if not USER_CONTEXT_FILE.exists():
-        USER_CONTEXT_FILE.write_text(USER_CONTEXT_TEMPLATE, encoding="utf-8")
-
-    info(f"Opening context file: {USER_CONTEXT_FILE.relative_to(REPO_ROOT)}")
-    _open_in_editor(USER_CONTEXT_FILE)
-
-    print()
-    print(f"{C.BOLD}{C.YELLOW}  ACTION REQUIRED{C.RESET}")
-    print(f"  Describe the feature or bug in the editor window that just opened.")
-    print(f"  File: {C.CYAN}{USER_CONTEXT_FILE.relative_to(REPO_ROOT)}{C.RESET}")
-    print(f"  Save and close the file when done.")
-    print()
-    _wait_for_user("Press Enter once you have saved your feature description")
-
-    content = USER_CONTEXT_FILE.read_text(encoding="utf-8")
-    if "(Replace this text with your description)" in content:
-        warn("Context file appears unchanged. Fill in your description and re-run.")
+    content = _collect_multiline_input("A.I.N. — Describe the feature or bug")
+    if not content:
+        warn("No description provided. Please re-run and describe your feature.")
         sys.exit(0)
 
+    USER_CONTEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    USER_CONTEXT_FILE.write_text(content, encoding="utf-8")
     success("Feature context saved.")
     set_stage("planning_questions", state)
 
@@ -969,11 +1008,10 @@ def run_planning_questions(state: dict, config: dict) -> None:
         f"When we reach full clarity, write a clean Q&A summary to {out_path}."
     )
 
-    info("Starting Codex brainstorm session inside the TUI ...")
+    info("Suspending TUI — starting Codex brainstorm session ...")
     info(f"Context: {brainstorm_context.relative_to(REPO_ROOT)}")
-    info(f"When Codex finishes clarifying, it will write:\n\t{OPEN_QUESTIONS_FILE.relative_to(REPO_ROOT)}")
-    info("Type 'done' in the input bar to end the session early.")
-    _run_interactive_in_tui([codex_cmd, brainstorm_prompt])
+    info(f"When Codex finishes, it will write:\n\t{OPEN_QUESTIONS_FILE.relative_to(REPO_ROOT)}")
+    _run_suspended([codex_cmd, brainstorm_prompt], "Codex Brainstorm Session")
 
     if not OPEN_QUESTIONS_FILE.exists():
         warn("OPEN_QUESTIONS.md not found. Creating placeholder.")
@@ -1006,17 +1044,8 @@ def run_planning_generation(state: dict, config: dict) -> None:
         f"Do not ask questions — generate the complete documents now."
     )
 
-    info("Opening Codex planning session in a new terminal window ...")
-    _open_popup_terminal("A.I.N. Planning", f'{codex_cmd} "{plan_prompt}"')
-
-    print()
-    print(f"{C.BOLD}{C.YELLOW}  PLANNING IN PROGRESS{C.RESET}")
-    print(f"  Codex is generating the plan documents in the popup window.")
-    print(f"  It should create:")
-    for doc in [PRD_FILE, DESIGN_FILE, FEATURE_SPEC_FILE]:
-        print(f"    {C.CYAN}{doc.relative_to(REPO_ROOT)}{C.RESET}")
-    print()
-    _wait_for_user("Press Enter when Codex has finished generating the plan")
+    info("Suspending TUI — starting Codex planning generation ...")
+    _run_suspended([codex_cmd, plan_prompt], "Codex Planning Generation")
 
     for doc, headings, name in [
         (PRD_FILE,          PRD_HEADINGS,    "PRD.md"),

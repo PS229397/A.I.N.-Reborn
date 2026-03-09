@@ -148,10 +148,21 @@ class RichRenderer:
             self._live = None
 
     def suspend(self) -> None:
-        """No-op: TUI stays running; input is captured inline."""
+        """Stop the Live display so a subprocess can own the terminal."""
+        if self._live is not None:
+            try:
+                self._live.stop()
+            except Exception:
+                pass
 
     def resume(self) -> None:
-        """No-op: TUI stays running; input is captured inline."""
+        """Restart the Live display after a subprocess has finished."""
+        if self._live is not None:
+            try:
+                self._live.start()
+            except Exception:
+                pass
+            self._refresh()
 
     def request_input(self, prompt: str) -> str:
         """Show *prompt* in the INPUT panel and wait for the user to press Enter.
