@@ -1469,16 +1469,16 @@ def rollback_implementation_files() -> list[str]:
 
 
 def invoke_codex_fallback(task_prompt: str, config: dict) -> str:
-    """Invoke the planning (codex) agent as a fallback for an oversized task."""
-    fallback_cfg = config.get("agents", {}).get("planning", {})
-    cmd = fallback_cfg.get("command", "")
-    if not cmd or not shutil.which(cmd):
+    """Invoke codex in full-auto implementation mode as a fallback for a failed task."""
+    fallback_cfg = config.get("agents", {}).get("implementation_fallback", {})
+    cmd = fallback_cfg.get("command", "codex")
+    if not shutil.which(cmd):
         raise RuntimeError(
-            "Codex fallback requested but 'planning' agent is not available. "
-            "Install codex and configure it in .ai-pipeline/config.json."
+            "Codex fallback requested but 'codex' is not available. "
+            "Install codex and check 'implementation_fallback' in .ai-pipeline/config.json."
         )
-    info("Invoking codex fallback agent ...")
-    return call_agent("planning", task_prompt, config)
+    info("Invoking codex (implementation fallback) ...")
+    return call_agent("implementation_fallback", task_prompt, config)
 
 
 def notify_fallback_and_get_decision(context: str, timeout_secs: int = 30) -> bool:
@@ -1552,19 +1552,13 @@ def _call_agent_with_fallback(
         warn(f"Agent {agent_name} exited {result.returncode}")
         _log(f"AGENT STDERR: {stderr[:500]}")
 
-        if is_token_limit_error(output + "\n" + stderr, result.returncode):
-            context_hint = f"Prompt size: {len(prompt):,} chars"
-            use_fallback = notify_fallback_and_get_decision(context_hint)
-            if use_fallback:
-                info("Rolling back any partial file writes ...")
-                rolled = rollback_implementation_files()
-                if rolled:
-                    for f in rolled:
-                        info(f"  Rolled back: {f}")
-                return invoke_codex_fallback(prompt, config)
-            raise RuntimeError(
-                f"Agent {agent_name} hit a token limit — task skipped by user."
-            )
+        # Exit code 1 (token exhaustion or any error) — auto-trigger codex fallback
+        info("Auto-switching to codex fallback ...")
+        rolled = rollback_implementation_files()
+        if rolled:
+            for f in rolled:
+                info(f"  Rolled back: {f}")
+        return invoke_codex_fallback(prompt, config)
 
     return output
 

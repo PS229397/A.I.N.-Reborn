@@ -27,6 +27,15 @@
       ],
       "model": null,
       "description": "Claude Code for implementation with file access — primary (Codex fallback enabled)"
+    },
+    "implementation_fallback": {
+      "command": "codex",
+      "args": [
+        "--approval-mode", "full-auto"
+      ],
+      "model": null,
+      "prompt_mode": "arg",
+      "description": "Codex in full-auto mode — fallback when Claude hits token limit during implementation"
     }
   },
   "validation": {
