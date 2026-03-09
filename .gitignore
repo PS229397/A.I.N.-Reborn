@@ -21,9 +21,33 @@ Thumbs.db
 *.iml
 .vscode/
 .claude/
+.docs/
 
 # Node
 node_modules/
 
-# Generated docs (tracked intentionally — remove these lines if you want to gitignore them)
-# docs/
+# AI pipeline — runtime state (generated per run, not part of the tool)
+.ai-pipeline/config.json
+.ai-pipeline/state.json
+.ai-pipeline/logs/
+.ai-pipeline/scan/
+.ai-pipeline/user_context.md
+.ai-pipeline/brainstorm_context.md
+.ai-pipeline/approvals/
+.ai-pipeline/state/
+
+# AI pipeline — per-project generated docs (not part of the tool)
+docs/architecture.md
+docs/PRD.md
+docs/DESIGN.md
+docs/FEATURE_SPEC.md
+docs/OPEN_QUESTIONS.md
+docs/OPEN_ANSWERS.md
+docs/TASKS.md
+docs/TASK_GRAPH.json
+docs/IMPLEMENTATION_LOG.md
+docs/VERIFICATION_REPORT.md
+
+# Chief — generated PRD input files (config is kept)
+.chief/prds/
+.chief/
