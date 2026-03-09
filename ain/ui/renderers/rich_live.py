@@ -768,8 +768,8 @@ class RichLiveRenderer:
         layout.split_column(*cols)
         # Keep STAGE/AGENT sizes; shrink only DECK/DATA by 4 lines.
         estimated_body_height = base_body_height
-        timing_size = max(6, (estimated_body_height * 4) // 7 + 1)
-        agent_size = max(5, (estimated_body_height // 2) - 1)
+        timing_size = max(6, (estimated_body_height * 4) // 7 - 1)
+        agent_size = max(5, (estimated_body_height // 2) - 3)
         pipeline_size = max(5, body_size - timing_size)
         stream_size = max(5, body_size - agent_size)
         deck = Layout(name="deck", ratio=1)
