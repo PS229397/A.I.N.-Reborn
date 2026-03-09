@@ -21,9 +21,12 @@
     },
     "implementation": {
       "command": "claude",
-      "args": ["--allowedTools", "Edit,Write,Bash,Read,Glob,Grep"],
+      "args": [
+        "--allowedTools",
+        "Edit,Write,Bash,Read,Glob,Grep"
+      ],
       "model": null,
-      "description": "Claude Code for implementation with file access"
+      "description": "Claude Code for implementation with file access — primary (Codex fallback enabled)"
     }
   },
   "validation": {

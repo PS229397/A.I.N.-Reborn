@@ -465,7 +465,7 @@ def call_agent(agent_name: str, prompt: str, config: dict) -> str:
         cmd += ["--model", model]
 
     info(f"Invoking {agent_cfg.get('command', agent_name)} ({agent_name}) ...")
-    _log(f"AGENT CALL: {agent_name} via {command} (prompt_mode={prompt_mode})")
+    _log(f"AGENT CALL: {agent_name} via {command}\n\t(prompt_mode={prompt_mode})")
 
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     (LOGS_DIR / f"{agent_name}_last_prompt.txt").write_text(prompt, encoding="utf-8")
@@ -971,7 +971,7 @@ def run_planning_questions(state: dict, config: dict) -> None:
 
     info("Starting Codex brainstorm session inside the TUI ...")
     info(f"Context: {brainstorm_context.relative_to(REPO_ROOT)}")
-    info(f"When Codex finishes clarifying, it will write: {OPEN_QUESTIONS_FILE.relative_to(REPO_ROOT)}")
+    info(f"When Codex finishes clarifying, it will write:\n\t{OPEN_QUESTIONS_FILE.relative_to(REPO_ROOT)}")
     info("Type 'done' in the input bar to end the session early.")
     _run_interactive_in_tui([codex_cmd, brainstorm_prompt])
 
@@ -1526,7 +1526,7 @@ def _call_agent_with_fallback(
         cmd += ["--model", model]
 
     info(f"Invoking {agent_cfg.get('command', agent_name)} ({agent_name}) ...")
-    _log(f"AGENT CALL: {agent_name} via {command} (prompt_mode={prompt_mode})")
+    _log(f"AGENT CALL: {agent_name} via {command}\n\t(prompt_mode={prompt_mode})")
 
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     (LOGS_DIR / f"{agent_name}_last_prompt.txt").write_text(prompt, encoding="utf-8")
@@ -2205,6 +2205,13 @@ def main() -> None:
     run_parser = subparsers.add_parser("run", help="Run pipeline from current stage")
     run_parser.add_argument("--resume", metavar="STAGE", help="Resume from a specific stage")
     run_parser.add_argument("--stage",  metavar="STAGE", help="Run only this stage")
+    run_parser.add_argument("--plain",  action="store_true", help="Disable TUI; print plain output")
+
+    resume_parser = subparsers.add_parser("resume", help="Resume pipeline from a specific stage")
+    resume_parser.add_argument("stage", metavar="STAGE", help="Stage to resume from")
+    resume_parser.add_argument("--plain", action="store_true", help="Disable TUI; print plain output")
+
+    subparsers.add_parser("continue", help="Continue from paused/failed/interrupted state")
 
     # Global flags (no subcommand)
     parser.add_argument("--status",  action="store_true", help="Show pipeline status")
@@ -2252,12 +2259,79 @@ def main() -> None:
 
     if args.command == "run":
         single = bool(getattr(args, "stage", None))
-        run_pipeline(start_stage=getattr(args, "resume", None) or getattr(args, "stage", None),
-                     single_stage=single)
+        plain  = getattr(args, "plain", False)
+        _run_with_tui(
+            start_stage=getattr(args, "resume", None) or getattr(args, "stage", None),
+            single_stage=single,
+            plain=plain,
+        )
+        return
+
+    if args.command == "resume":
+        plain = getattr(args, "plain", False)
+        _run_with_tui(start_stage=args.stage, plain=plain)
+        return
+
+    if args.command == "continue":
+        state = load_state()
+        current = state.get("current_stage", "idle")
+        if current == "done":
+            success("Pipeline is already complete.")
+            show_status(state)
+            return
+        if current in ("paused", "failed"):
+            stage = state.get("last_attempted_stage") or state.get("last_safe_stage", "scanning")
+        elif current in STAGES and current not in ("idle",):
+            stage = current
+        else:
+            stage = "scanning"
+        info(f"Continuing from: {STAGE_LABELS.get(stage, stage)}")
+        _run_with_tui(start_stage=stage)
         return
 
     # No subcommand and no flag — show help
     parser.print_help()
+
+
+def _run_with_tui(
+    start_stage: str | None = None,
+    single_stage: bool = False,
+    plain: bool = False,
+) -> None:
+    """Launch run_pipeline, wrapping in the Rich TUI unless --plain is set."""
+    if plain:
+        run_pipeline(start_stage=start_stage, single_stage=single_stage, mode="plain")
+        return
+
+    try:
+        from ain.tui import RichRenderer
+        from ain.runtime.emitter import Emitter
+        from rich.console import Console as _Console
+        from ain import __version__ as _ver
+
+        # Use Rich's own terminal detection — more reliable than sys.stdout.isatty()
+        if not _Console().is_terminal:
+            run_pipeline(start_stage=start_stage, single_stage=single_stage, mode="plain")
+            return
+
+        emitter  = Emitter()
+        renderer = RichRenderer(version=_ver)
+        renderer.subscribe(emitter)
+        renderer.start()
+        try:
+            run_pipeline(
+                start_stage=start_stage,
+                single_stage=single_stage,
+                emitter=emitter,
+                renderer=renderer,
+                mode="rich",
+            )
+        finally:
+            renderer.stop()
+
+    except Exception:
+        # Any TUI failure — fall back to plain output
+        run_pipeline(start_stage=start_stage, single_stage=single_stage, mode="plain")
 
 
 if __name__ == "__main__":
