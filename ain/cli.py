@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import click
 
+from ain import pipeline
 from ain.commands import approve, config, logs, reset, run, status, version
 
 
@@ -17,14 +18,25 @@ def _warn_deprecated(flag: str, replacement: str) -> None:
 
 @click.group()
 @click.option("--reset", "legacy_reset", is_flag=True, hidden=True, help="Deprecated alias for `ain reset`.")
+@click.option("--clean", "legacy_clean", is_flag=True, hidden=True, help="Deprecated alias for `ain clean`.")
 @click.option("--approve", "legacy_approve", is_flag=True, hidden=True, help="Deprecated alias for `ain approve`.")
 @click.option("--status", "legacy_status", is_flag=True, hidden=True, help="Deprecated alias for `ain status`.")
 @click.pass_context
-def main(ctx: click.Context, legacy_reset: bool, legacy_approve: bool, legacy_status: bool) -> None:
+def main(
+    ctx: click.Context,
+    legacy_reset: bool,
+    legacy_clean: bool,
+    legacy_approve: bool,
+    legacy_status: bool,
+) -> None:
     """A.I.N. Pipeline command-line interface."""
     if legacy_reset:
         _warn_deprecated("--reset", "ain reset")
         reset.execute(hard=False, yes=False)
+        ctx.exit(0)
+    if legacy_clean:
+        _warn_deprecated("--clean", "ain clean")
+        pipeline.clean_workspace()
         ctx.exit(0)
     if legacy_approve:
         _warn_deprecated("--approve", "ain approve")
@@ -83,6 +95,12 @@ def approve_command(run_id: str | None) -> None:
 def reset_command(hard: bool, yes: bool) -> None:
     """Reset pipeline state (soft by default)."""
     reset.execute(hard=hard, yes=yes)
+
+
+@main.command(name="clean")
+def clean_command() -> None:
+    """Remove generated pipeline artifacts and reset to idle."""
+    pipeline.clean_workspace()
 
 
 @main.command(name="logs")

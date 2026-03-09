@@ -309,7 +309,6 @@ class C:
     BLUE    = "\033[94m" if _USE_COLOR else ""
     MAGENTA = "\033[95m" if _USE_COLOR else ""
     CYAN    = "\033[38;2;0;229;255m" if _USE_COLOR else ""
-    WHITE   = "\033[97m" if _USE_COLOR else ""
 
 
 def _emit_log(message: str, level: LogLevel) -> None:
@@ -349,7 +348,7 @@ def error(text: str) -> None:
 
 def step(n: int, total: int, text: str) -> None:
     if _EMITTER is None:
-        print(f"{C.BOLD}{C.WHITE}  [{n}/{total}]{C.RESET} {text}")
+        print(f"{C.BOLD}{C.CYAN}  [{n}/{total}]{C.RESET} {text}")
     _emit_log(f"[{n}/{total}] {text}", LogLevel.INFO)
 
 # 
