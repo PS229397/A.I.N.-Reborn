@@ -2724,6 +2724,8 @@ def invoke_codex_fallback(task_prompt: str, config: dict) -> str:
             "Install codex and check 'implementation_fallback' in .ai-pipeline/config.json."
         )
     info("Invoking codex (implementation fallback) ...")
+    if _EMITTER is not None:
+        return _call_agent_live("implementation_fallback", task_prompt, config, log_slug="implementation_fallback")
     return call_agent("implementation_fallback", task_prompt, config)
 
 
@@ -2779,10 +2781,30 @@ def _call_agent_with_fallback(
     (LOGS_DIR / f"{agent_name}_last_prompt.txt").write_text(prompt, encoding="utf-8")
 
     try:
-        if prompt_mode == "arg":
-            result = run_command(cmd + [prompt], capture=True, timeout=600)
+        if _EMITTER is not None:
+            if prompt_mode == "arg":
+                rc, output = _run_agent_background(
+                    cmd + [prompt],
+                    agent_name=_agent_display_name(agent_name, config),
+                    log_slug="implementation",
+                )
+            else:
+                rc, output = _run_agent_background(
+                    cmd,
+                    agent_name=_agent_display_name(agent_name, config),
+                    log_slug="implementation",
+                    input_text=prompt,
+                )
+            stderr = ""
+            returncode = rc
         else:
-            result = run_command(cmd, capture=True, input_text=prompt, timeout=600)
+            if prompt_mode == "arg":
+                result = run_command(cmd + [prompt], capture=True, timeout=600)
+            else:
+                result = run_command(cmd, capture=True, input_text=prompt, timeout=600)
+            output = result.stdout or ""
+            stderr = (result.stderr or "").strip()
+            returncode = result.returncode
     except FileNotFoundError:
         raise RuntimeError(
             f"Agent command not found: '{command}'. "
@@ -2791,12 +2813,10 @@ def _call_agent_with_fallback(
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Agent '{agent_name}' timed out after 600 seconds.")
 
-    output = result.stdout or ""
-    stderr = (result.stderr or "").strip()
     (LOGS_DIR / f"{agent_name}_last_output.txt").write_text(output, encoding="utf-8")
 
-    if result.returncode != 0:
-        warn(f"Agent {agent_name} exited {result.returncode}")
+    if returncode != 0:
+        warn(f"Agent {agent_name} exited {returncode}")
         _log(f"AGENT STDERR: {stderr[:500]}")
 
         # Exit code 1 (token exhaustion or any error)  auto-trigger codex fallback
@@ -2857,7 +2877,10 @@ def _run_one_task(
         if mode == "default" and agent_key == "implementation":
             _call_agent_with_fallback(agent_key, task_prompt, state, config)
         else:
-            call_agent(agent_key, task_prompt, config)
+            if _EMITTER is not None:
+                _call_agent_live(agent_key, task_prompt, config, log_slug=f"implementation_task_{task_id}")
+            else:
+                call_agent(agent_key, task_prompt, config)
 
         duration_ms = int((datetime.now(timezone.utc) - t0).total_seconds() * 1000)
         _emit(TaskCompleted(
