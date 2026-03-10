@@ -4420,6 +4420,8 @@ def _run_with_tui(
                         "SUCCESS: pipeline completed. [N] new AIN session, [Q] quit"
                     ).strip().lower()
                     clean_workspace(silent=True)
+                    if hasattr(renderer, "reset_state"):
+                        renderer.reset_state()
                     if choice == "n":
                         save_state(_default_state(load_config()))
                         if PLANNING_APPROVED_FLAG.exists():
