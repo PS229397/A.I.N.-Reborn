@@ -165,6 +165,7 @@ class _RendererState:
     data_scroll_offset: int = 0
     data_autoscroll: bool = True
     stage_scroll_offset: int = 0
+    stage_autoscroll: bool = True
     agent_scroll_offset: int = 0
     agent_autoscroll: bool = True
     compact: bool = True        # compact stage list density
@@ -542,7 +543,13 @@ class RichLiveRenderer:
             state.deck_scroll_offset = max(0, state.deck_scroll_offset + delta)
             return
         if panel == "stage":
-            state.stage_scroll_offset = max(0, state.stage_scroll_offset + delta)
+            if delta > 0:
+                state.stage_autoscroll = False
+                state.stage_scroll_offset += delta
+            else:
+                state.stage_scroll_offset = max(0, state.stage_scroll_offset + delta)
+                if state.stage_scroll_offset == 0:
+                    state.stage_autoscroll = True
             return
         if panel == "data":
             if delta > 0:
@@ -600,6 +607,7 @@ class RichLiveRenderer:
             state.data_scroll_offset = 0
             state.data_autoscroll = True
             state.stage_scroll_offset = 0
+            state.stage_autoscroll = True
             state.agent_scroll_offset = 0
             state.agent_autoscroll = True
             state.tasks = self._load_task_entries()
@@ -663,25 +671,31 @@ class RichLiveRenderer:
             if entry is None:
                 entry = _TaskEntry(
                     task_id=event.task_id,
-                    description=event.description,
+                    description=self._compact_task_text(event.description),
                     agent=event.agent,
                 )
                 state.tasks.append(entry)
             entry.agent = event.agent
             entry.status = "running"
             entry.error = None
+            if state.stage_autoscroll:
+                state.stage_scroll_offset = 0
 
         elif isinstance(event, TaskCompleted):
             entry = self._find_task(event.task_id)
             if entry is not None:
                 entry.status = "done"
                 entry.duration_ms = event.duration_ms
+            if state.stage_autoscroll:
+                state.stage_scroll_offset = 0
 
         elif isinstance(event, TaskFailed):
             entry = self._find_task(event.task_id)
             if entry is not None:
                 entry.status = "failed"
                 entry.error = event.error
+            if state.stage_autoscroll:
+                state.stage_scroll_offset = 0
 
         elif isinstance(event, RunCompleted):
             state.run_status = event.status.value
@@ -714,12 +728,19 @@ class RichLiveRenderer:
             entries.append(
                 _TaskEntry(
                     task_id=str(task.get("id", "")),
-                    description=str(task.get("description", "")).strip(),
+                    description=self._compact_task_text(str(task.get("description", "")).strip()),
                     status="done" if status == "completed" else status,
                     duration_ms=None,
                 )
             )
         return entries
+
+    @staticmethod
+    def _compact_task_text(description: str, limit: int = 48) -> str:
+        text = " ".join(description.split())
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3].rstrip() + "..."
 
     # -----------------------------------------------------------------------------
     # Layout builders
@@ -792,7 +813,7 @@ class RichLiveRenderer:
         timing_size = max(6, (estimated_body_height * 4) // 7 - 1)
         timing_size = max(6, timing_size - 2)
         agent_size = max(5, (estimated_body_height // 2) - 3)
-        agent_size += 1
+        agent_size += 6
         pipeline_size = max(5, body_size - timing_size)
         stream_size = max(5, body_size - agent_size)
         deck = Layout(name="deck", ratio=1)
@@ -823,7 +844,7 @@ class RichLiveRenderer:
         timing_size = max(6, (estimated_body_height * 4) // 7 - 1)
         timing_size = max(6, timing_size - 2)
         agent_size = max(5, (estimated_body_height // 2) - 3)
-        agent_size += 1
+        agent_size += 6
         pipeline_size = max(5, body_size - timing_size)
         stream_size = max(5, body_size - agent_size)
         return {
@@ -878,7 +899,7 @@ class RichLiveRenderer:
     _TASK_STYLE: dict[str, tuple[str, str]] = {
         "pending": ("◦", _C_DIM_CYAN),
         "running": ("▷", "#2EDCD1"),
-        "done":    ("◆", _C_NEON_CYAN),
+        "done":    ("▶", _C_NEON_PINK),
         "failed":  ("✖", _C_NEON_CYAN),
     }
     _FOCUS_ORDER: tuple[str, ...] = ("none", "deck", "data", "stage", "agent")

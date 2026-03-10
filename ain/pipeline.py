@@ -387,6 +387,103 @@ def _display_path(path: Path) -> str:
         return str(path)
 
 
+def _workspace_status_snapshot() -> dict[str, str]:
+    """Return a repo-relative git porcelain snapshot keyed by path."""
+    git = shutil.which("git")
+    if not git:
+        return {}
+
+    try:
+        result = run_command(
+            [git, "status", "--short", "--untracked-files=all"],
+            capture=True,
+            timeout=30,
+        )
+    except Exception:
+        return {}
+
+    if result.returncode != 0:
+        return {}
+
+    snapshot: dict[str, str] = {}
+    for raw in (result.stdout or "").splitlines():
+        if len(raw) < 4:
+            continue
+        status = raw[:2]
+        path = raw[3:].strip()
+        if not path:
+            continue
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1].strip()
+        snapshot[path.replace("\\", "/")] = status
+    return snapshot
+
+
+def _emit_workspace_delta(agent_name: str, before: dict[str, str]) -> None:
+    """Send a concise workspace delta summary to the agent output panel."""
+    after = _workspace_status_snapshot()
+    if not after and not before:
+        return
+
+    changed_paths = sorted(set(before) | set(after))
+    delta_lines: list[str] = []
+
+    for path in changed_paths:
+        old_status = before.get(path)
+        new_status = after.get(path)
+        if old_status == new_status:
+            continue
+        if new_status is None:
+            label = "CLEAN"
+        elif new_status == "??":
+            label = "NEW"
+        elif "D" in new_status:
+            label = "DELETE"
+        elif "R" in new_status or "C" in new_status:
+            label = "MOVE"
+        else:
+            label = "WRITE"
+        delta_lines.append(f"{label} {path}")
+
+    if not delta_lines:
+        return
+
+    _emit(AgentOutput(ts=_now_iso(), agent=agent_name, line="WORKSPACE DELTA"))
+    for line in delta_lines[:12]:
+        _emit(AgentOutput(ts=_now_iso(), agent=agent_name, line=line))
+
+    git = shutil.which("git")
+    if not git:
+        return
+
+    diff_targets = [path for path in changed_paths if after.get(path) not in {None, "??"}]
+    if not diff_targets:
+        return
+
+    try:
+        result = run_command(
+            [git, "diff", "--numstat", "--", *diff_targets],
+            capture=True,
+            timeout=30,
+        )
+    except Exception:
+        return
+
+    if result.returncode != 0:
+        return
+
+    stats = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    if not stats:
+        return
+
+    _emit(AgentOutput(ts=_now_iso(), agent=agent_name, line="DIFFSTAT"))
+    for line in stats[:8]:
+        parts = line.split("\t", 2)
+        if len(parts) == 3:
+            added, removed, path = parts
+            _emit(AgentOutput(ts=_now_iso(), agent=agent_name, line=f"+{added} -{removed} {path}"))
+
+
 def _tui_suspend() -> None:
     """Pause the TUI (if active) before a blocking input() prompt."""
     if _RENDERER is not None and hasattr(_RENDERER, "suspend"):
@@ -2872,6 +2969,7 @@ def _run_one_task(
     info(f"   Task {task_id}: {description}")
 
     t0 = datetime.now(timezone.utc)
+    workspace_before = _workspace_status_snapshot()
     try:
         task_prompt = _build_task_prompt(task, prompt_file)
         if mode == "default" and agent_key == "implementation":
@@ -2881,6 +2979,8 @@ def _run_one_task(
                 _call_agent_live(agent_key, task_prompt, config, log_slug=f"implementation_task_{task_id}")
             else:
                 call_agent(agent_key, task_prompt, config)
+
+        _emit_workspace_delta(agent_name, workspace_before)
 
         duration_ms = int((datetime.now(timezone.utc) - t0).total_seconds() * 1000)
         _emit(TaskCompleted(
