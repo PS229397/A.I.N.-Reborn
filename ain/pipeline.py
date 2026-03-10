@@ -35,6 +35,7 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -42,7 +43,7 @@ from pathlib import Path
 from textwrap import dedent
 from typing import Any
 
-from ain.models.state import StageTiming
+from ain.models.state import PlannedFileChange, StageTiming
 from ain.runtime.emitter import Emitter
 from ain.runtime.events import (
     ApprovedEvent,
@@ -1291,8 +1292,12 @@ def _resolve_agent_command(agent_name: str, config: dict[str, Any]) -> list[str]
 
 
 def _agent_display_name(agent_name: str, config: dict[str, Any]) -> str:
-    command = (config.get("agents", {}).get(agent_name) or {}).get("command", agent_name)
-    return str(command).capitalize()
+    agent_cfg = config.get("agents", {}).get(agent_name) or {}
+    command = str(agent_cfg.get("command", agent_name)).capitalize()
+    model = agent_cfg.get("model")
+    if model:
+        return f"{command} ({model})"
+    return command
 
 
 def _kill_tree(p: subprocess.Popen) -> None:
@@ -1647,7 +1652,7 @@ def run_architecture(state: dict, config: dict) -> None:
 
     rc, gemini_output = _run_agent_background(
         [resolved] + extra_args,
-        agent_name="Gemini",
+        agent_name=_agent_display_name("architecture", config),
         log_slug="architecture",
         input_text=full_prompt,  # embed context directly  .ai-pipeline/ may be gitignored
     )
@@ -1676,7 +1681,7 @@ def run_architecture(state: dict, config: dict) -> None:
         codex_cmd = shutil.which("codex") or "codex"
         _, codex_output = _run_agent_background(
             [codex_cmd],
-            agent_name="Codex (arch fallback)",
+            agent_name="Codex (gpt-5.1)",
             log_slug="architecture_codex",
             input_text=full_prompt,
         )
@@ -2290,13 +2295,13 @@ def _run_planning_in_background(agent_key: str, prompt: str, config: dict[str, A
         cmd = cmd + [prompt]
         rc, output = _run_agent_background(
             cmd,
-            agent_name=f"{_agent_display_name(agent_key, config)} (planning)",
+            agent_name=f"{_agent_display_name(agent_key, config)} - planning",
             log_slug="planning_generation",
         )
     else:
         rc, output = _run_agent_background(
             cmd,
-            agent_name=f"{_agent_display_name(agent_key, config)} (planning)",
+            agent_name=f"{_agent_display_name(agent_key, config)} - planning",
             log_slug="planning_generation",
             input_text=prompt,
         )
@@ -2323,12 +2328,170 @@ def _run_planning_fallback_claude(prompt: str) -> None:
         return
     _, output = _run_agent_background(
         [claude_bin, "--print"],
-        agent_name="Claude (planning)",
+        agent_name="Claude - planning",
         log_slug="planning_generation_claude",
         input_text=prompt,
     )
     if output.strip():
         _parse_and_write_planning_docs(output)
+
+
+def _find_answer(label: str, text: str) -> str | None:
+    """Return the answer line matching **A#:** from OPEN_QUESTIONS.md."""
+    match = re.search(rf"\*\*{re.escape(label)}:\*\*\s*(.+)", text)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def _first_inline_code(text: str | None) -> str | None:
+    if not text:
+        return None
+    match = re.search(r"`([^`]+)`", text)
+    return match.group(1).strip() if match else None
+
+
+def _planned_file_change_from_open_questions() -> dict[str, Any] | None:
+    """Derive the docs/test.md planned change from resolved OPEN_QUESTIONS.md answers."""
+    if not OPEN_QUESTIONS_FILE.exists():
+        warn("docs/OPEN_QUESTIONS.md not found  skipping planned file change extraction.")
+        return None
+
+    content = OPEN_QUESTIONS_FILE.read_text(encoding="utf-8")
+    path_answer = _first_inline_code(_find_answer("A1", content))
+    body_answer = _first_inline_code(_find_answer("A2", content))
+
+    if not path_answer or not body_answer:
+        warn("Could not parse docs/OPEN_QUESTIONS.md for planned file change values.")
+        return None
+
+    if path_answer != "docs/test.md":
+        warn(f"OPEN_QUESTIONS.md suggests path '{path_answer}' (expected docs/test.md). Using provided value.")
+    if body_answer != "# hello world":
+        warn("OPEN_QUESTIONS.md suggests content different from '# hello world'. Using provided value.")
+
+    return {
+        "path": path_answer,
+        "content": body_answer,
+        "operation": "create",
+        "allow_overwrite": False,
+        "ensure_parent_dir": True,
+    }
+
+
+def _upsert_planned_file_change(state: dict[str, Any], change: dict[str, Any]) -> None:
+    """Insert or replace a planned file change in state.planned_file_changes."""
+    changes: list[Any] = state.setdefault("planned_file_changes", [])
+    normalized: list[dict[str, Any]] = []
+    inserted = False
+
+    for existing in changes:
+        existing_dict = existing if isinstance(existing, dict) else {
+            "path": getattr(existing, "path", None),
+            "content": getattr(existing, "content", None),
+            "operation": getattr(existing, "operation", None),
+            "allow_overwrite": getattr(existing, "allow_overwrite", None),
+            "ensure_parent_dir": getattr(existing, "ensure_parent_dir", None),
+        }
+        if existing_dict.get("path") == change.get("path"):
+            normalized.append(change)
+            inserted = True
+        else:
+            normalized.append(existing_dict)
+
+    if not inserted:
+        normalized.append(change)
+
+    state["planned_file_changes"] = normalized
+
+
+def apply_planned_file_change(
+    change: PlannedFileChange | dict[str, Any],
+    *,
+    emitter: Emitter | None = None,
+    repo_root: Path | None = None,
+) -> str:
+    """Apply a single planned file change to the local filesystem.
+
+    Returns a status string: ``"created"``, ``"overwritten"``, or ``"skipped"``.
+    """
+    emitter = emitter if emitter is not None else _EMITTER
+    root = (repo_root or REPO_ROOT).resolve()
+
+    if isinstance(change, PlannedFileChange):
+        path = change.path
+        content = change.content
+        operation = change.operation or "create"
+        allow_overwrite = change.allow_overwrite
+        ensure_parent_dir = change.ensure_parent_dir
+    elif isinstance(change, dict):
+        path = change.get("path")
+        content = change.get("content", "")
+        operation = change.get("operation", "create")
+        allow_overwrite = bool(change.get("allow_overwrite", False))
+        ensure_parent_dir = bool(change.get("ensure_parent_dir", True))
+    else:
+        raise TypeError("change must be a PlannedFileChange or dict")
+
+    if not isinstance(path, str) or not path:
+        raise ValueError("planned file change requires a non-empty path")
+    if not isinstance(content, str):
+        raise ValueError("planned file change content must be a string")
+
+    target = (root / path).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise RuntimeError(f"Planned file change path '{path}' escapes the repository root.")
+
+    if ensure_parent_dir:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    elif not target.parent.exists():
+        raise RuntimeError(f"Parent directory does not exist for {path} and ensure_parent_dir=False")
+
+    op = operation or "create"
+    if emitter is not None:
+        emitter.planned_file_change_started(path, op)
+
+    exists = target.exists()
+    if exists:
+        if op == "skip_if_exists":
+            info(f"Skipped {path} (already exists).")
+            if emitter is not None:
+                emitter.planned_file_change_completed(path, op, status="skipped")
+            return "skipped"
+        if not allow_overwrite:
+            info(f"Skipped {path} (already exists, overwrite disabled).")
+            if emitter is not None:
+                emitter.planned_file_change_completed(path, op, status="skipped")
+            return "skipped"
+
+    tmp_name: str | None = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(prefix=f"{target.name}.", dir=target.parent)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        Path(tmp_name).replace(target)
+    except Exception as exc:  # noqa: BLE001 - propagate after emitting failure
+        if emitter is not None:
+            emitter.planned_file_change_completed(path, op, status="failed", error=str(exc))
+        try:
+            if tmp_name:
+                tmp_path = Path(tmp_name)
+                if tmp_path.exists():
+                    tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+    status = "overwritten" if exists else "created"
+    if emitter is not None:
+        emitter.planned_file_change_completed(path, op, status=status)
+    if exists:
+        info(f"Overwrote {path} with planned content.")
+    else:
+        info(f"Created {path} with planned content.")
+    return status
 
 
 def run_planning_generation(state: dict, config: dict) -> None:
@@ -2387,6 +2550,12 @@ def run_planning_generation(state: dict, config: dict) -> None:
         sys.exit(0)
 
     success("Planning documents validated.")
+    planned_change = _planned_file_change_from_open_questions()
+    if planned_change:
+        _upsert_planned_file_change(state, planned_change)
+        info(f"Planned file change registered for {planned_change['path']}")
+    else:
+        warn("No planned file change added from docs/OPEN_QUESTIONS.md.")
     set_stage("task_creation", state)
 
 
@@ -2549,7 +2718,11 @@ def _run_chief_background(config: dict) -> tuple[bool, str]:
 
     cmd = [resolved] + extra_args + ["--no-retry", "main"]
     info("Running chief in background (output in AGENT.OUTPUT panel) ...")
-    rc, output = _run_agent_background(cmd, agent_name="Chief", log_slug="task_creation")
+    rc, output = _run_agent_background(
+        cmd,
+        agent_name=_agent_display_name("task_creation", config),
+        log_slug="task_creation",
+    )
     if rc != 0:
         warn(f"chief exited with code {rc}.")
         return False, output
@@ -2715,7 +2888,13 @@ def run_task_creation(state: dict, config: dict) -> None:
                 if validate_tasks_file(TASKS_FILE):
                     for line in TASKS_FILE.read_text(encoding="utf-8").splitlines():
                         if line.strip():
-                            _emit(AgentOutput(ts=_now_iso(), line=line, agent="Chief"))
+                            _emit(
+                                AgentOutput(
+                                    ts=_now_iso(),
+                                    line=line,
+                                    agent=_agent_display_name("task_creation", config),
+                                )
+                            )
         else:
             try:
                 output = (
@@ -3105,13 +3284,9 @@ def _call_agent_with_fallback(
             stderr = ""
             returncode = rc
         else:
-            if prompt_mode == "arg":
-                result = run_command(cmd + [prompt], capture=True, timeout=600)
-            else:
-                result = run_command(cmd, capture=True, input_text=prompt, timeout=600)
-            output = result.stdout or ""
-            stderr = (result.stderr or "").strip()
-            returncode = result.returncode
+            output = call_agent(agent_name, prompt, config)
+            stderr = ""
+            returncode = 0
     except FileNotFoundError:
         raise RuntimeError(
             f"Agent command not found: '{command}'. "
@@ -3119,6 +3294,17 @@ def _call_agent_with_fallback(
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Agent '{agent_name}' timed out after 600 seconds.")
+    except (RuntimeError, subprocess.CalledProcessError) as exc:
+        if _EMITTER is not None:
+            raise
+        warn(f"Agent {agent_name} failed: {exc}")
+        info("Auto-switching to codex fallback ...")
+        rolled = rollback_implementation_files()
+        if rolled:
+            for f in rolled:
+                info(f"  Rolled back: {f}")
+        _persist_stage_fallback("implementation", state, config)
+        return invoke_codex_fallback(prompt, config)
 
     (LOGS_DIR / f"{agent_name}_last_output.txt").write_text(output, encoding="utf-8")
 
@@ -3309,8 +3495,34 @@ def run_implementation(state: dict, config: dict) -> None:
     tasks     = task_data.get("tasks", [])
     pending   = [t for t in tasks if t.get("status") == "pending"]
 
+    log_lines: list[str] = [
+        "# Implementation Log",
+        f"\nStarted: {datetime.now(timezone.utc).isoformat()}",
+        f"Branch: {state.get('branch', 'unknown')}",
+        "",
+    ]
+
+    planned_changes = state.get("planned_file_changes") or []
+    if planned_changes:
+        info("Applying planned file changes ...")
+        log_lines.append("## Planned File Changes")
+        for change in planned_changes:
+            change_path = getattr(change, "path", None) if hasattr(change, "path") else None
+            if change_path is None and isinstance(change, dict):
+                change_path = change.get("path")
+            try:
+                status = apply_planned_file_change(change, emitter=_EMITTER, repo_root=REPO_ROOT)
+                log_lines.append(f"{change_path}: {status}")
+            except Exception as exc:
+                log_lines.append(f"{change_path or 'unknown'}: FAILED ({exc})")
+                raise
+        log_lines += ["", "---", ""]
+    else:
+        info("No planned file changes to apply.")
+
     if not pending:
         success("All tasks already completed.")
+        IMPLEMENTATION_LOG_FILE.write_text("\n".join(log_lines), encoding="utf-8")
         set_stage("validation", state)
         return
 
@@ -3320,13 +3532,6 @@ def run_implementation(state: dict, config: dict) -> None:
     prompt_file = PROMPTS_DIR / "implementation_prompt.md"
     if not prompt_file.exists():
         raise RuntimeError(f"Missing prompt: {prompt_file}")
-
-    log_lines: list[str] = [
-        "# Implementation Log",
-        f"\nStarted: {datetime.now(timezone.utc).isoformat()}",
-        f"Branch: {state.get('branch', 'unknown')}",
-        "",
-    ]
 
     parallel_groups = task_data.get("parallel_groups", [])
     if parallel_groups:

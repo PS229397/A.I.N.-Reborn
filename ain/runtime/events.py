@@ -104,6 +104,31 @@ class StageFailed:
 
 
 # ---------------------------------------------------------------------------
+# Planned file changes
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PlannedFileChangeStarted:
+    """Emitted just before applying a planned file change."""
+
+    path: str
+    operation: str
+    started_at: str
+
+
+@dataclass
+class PlannedFileChangeCompleted:
+    """Emitted after a planned file change is processed."""
+
+    path: str
+    operation: str
+    status: str
+    ended_at: str
+    error: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
 # Task lifecycle
 # ---------------------------------------------------------------------------
 
@@ -218,6 +243,8 @@ AnyEvent = Union[
     ApprovalReceived,
     WaitingApprovalEvent,
     ApprovedEvent,
+    PlannedFileChangeStarted,
+    PlannedFileChangeCompleted,
     HealthCheckResult,
     StageTimingUpdated,
 ]
@@ -234,6 +261,8 @@ __all__ = [
     "StageStarted",
     "StageCompleted",
     "StageFailed",
+    "PlannedFileChangeStarted",
+    "PlannedFileChangeCompleted",
     "TaskStarted",
     "TaskCompleted",
     "TaskFailed",

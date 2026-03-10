@@ -9,6 +9,8 @@ from ain.models.state import HealthSummary, StageTiming
 from ain.runtime.events import (
     AnyEvent,
     HealthCheckResult,
+    PlannedFileChangeCompleted,
+    PlannedFileChangeStarted,
     StageCompleted,
     StageFailed,
     StageQueued,
@@ -115,6 +117,40 @@ class Emitter:
                 stage_name=stage_name,
                 error=error,
                 error_code=error_code,
+                ended_at=ended_at or _now_iso(),
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # Planned file change helpers
+    # ------------------------------------------------------------------
+
+    def planned_file_change_started(
+        self, path: str, operation: str, *, started_at: str | None = None
+    ) -> None:
+        self.emit(
+            PlannedFileChangeStarted(
+                path=path,
+                operation=operation,
+                started_at=started_at or _now_iso(),
+            )
+        )
+
+    def planned_file_change_completed(
+        self,
+        path: str,
+        operation: str,
+        *,
+        status: str = "success",
+        error: str | None = None,
+        ended_at: str | None = None,
+    ) -> None:
+        self.emit(
+            PlannedFileChangeCompleted(
+                path=path,
+                operation=operation,
+                status=status,
+                error=error,
                 ended_at=ended_at or _now_iso(),
             )
         )

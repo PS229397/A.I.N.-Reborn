@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from ain import pipeline
-from ain.models.state import PipelineState
+from ain.models.state import PipelineState, PlannedFileChange
 from ain.services import state_service
 from ain.services.state_service import STATE_SCHEMA_VERSION, StateWriteError
 
@@ -166,3 +166,36 @@ def test_save_state_rejects_wrong_version(tmp_path):
         state_service.save_state(state, state_path=state_path)
 
     assert not state_path.exists()
+
+
+def test_planned_file_changes_round_trip(monkeypatch, tmp_path):
+    monkeypatch.setattr(state_service, "_now_iso", lambda: "2026-04-04T04:04:04+00:00")
+    state_path = tmp_path / "state.json"
+    planned_change = PlannedFileChange(
+        path="docs/test.md",
+        content="# hello world",
+        operation="create",
+        allow_overwrite=False,
+        ensure_parent_dir=True,
+    )
+
+    state = PipelineState(
+        version=STATE_SCHEMA_VERSION,
+        current_stage="implementation",
+        status="running",
+        last_error=None,
+        artifacts={"sample": True},
+        planned_file_changes=[planned_change],
+        created_at="2026-04-04T00:00:00+00:00",
+        updated_at="2026-04-04T00:00:00+00:00",
+    )
+
+    state_service.save_state(state, state_path=state_path)
+    loaded = state_service.load_state(state_path=state_path)
+
+    assert len(loaded.planned_file_changes) == 1
+    assert loaded.planned_file_changes[0] == planned_change
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert persisted["planned_file_changes"][0]["path"] == "docs/test.md"
+    assert persisted["planned_file_changes"][0]["content"] == "# hello world"
