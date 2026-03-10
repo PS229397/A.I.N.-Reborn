@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
 import json
 import sys
+from contextlib import redirect_stdout
 
 from ain import pipeline
 
@@ -157,3 +159,61 @@ def test_reset_flag_reinitializes_state_and_removes_approval(monkeypatch, tmp_pa
     assert persisted["branch"] is None
     assert persisted["started_at"] is None
     assert persisted["last_updated"] is not None
+
+
+def test_status_subcommand_loads_and_displays_state(monkeypatch, tmp_path):
+    _configure_runtime_paths(monkeypatch, tmp_path)
+    expected_state = {"current_stage": "paused", "completed_stages": ["scanning"]}
+    seen = {}
+
+    monkeypatch.setattr(pipeline, "load_state", lambda: expected_state)
+    monkeypatch.setattr(
+        pipeline,
+        "show_status",
+        lambda state: seen.setdefault("state", state),
+    )
+    monkeypatch.setattr(sys, "argv", ["ain", "status"])
+
+    pipeline.main()
+
+    assert seen["state"] is expected_state
+
+
+def test_approve_subcommand_writes_approval_and_advances_waiting_stage(monkeypatch, tmp_path):
+    _configure_runtime_paths(monkeypatch, tmp_path)
+    transitions = {}
+
+    state = {
+        "current_stage": "waiting_approval",
+        "completed_stages": ["scanning", "architecture", "planning_generation"],
+        "started_at": None,
+        "last_updated": None,
+    }
+
+    monkeypatch.setattr(pipeline, "load_state", lambda: state)
+
+    def fake_set_stage(stage, incoming_state=None):
+        transitions["stage"] = stage
+        transitions["state"] = incoming_state
+        return incoming_state or state
+
+    monkeypatch.setattr(pipeline, "set_stage", fake_set_stage)
+    monkeypatch.setattr(sys, "argv", ["ain", "approve"])
+
+    pipeline.main()
+
+    assert pipeline.PLANNING_APPROVED_FLAG.exists()
+    assert transitions["stage"] == "implementation"
+    assert transitions["state"] is state
+
+
+def test_version_subcommand_prints_version(monkeypatch, tmp_path):
+    _configure_runtime_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline, "run_command_output", lambda *_args, **_kwargs: "abc123\n")
+    monkeypatch.setattr(sys, "argv", ["ain", "version", "--short"])
+
+    stdout = io.StringIO()
+    with redirect_stdout(stdout):
+        pipeline.main()
+
+    assert stdout.getvalue().strip() == "0.1.8"

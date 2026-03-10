@@ -48,8 +48,6 @@ from ain.runtime.events import (
     TaskStarted,
 )
 
-_VERSION = "0.1.8"
-
 # Maximum log lines retained in the stream panel buffer.
 _MAX_LOG_LINES = 200
 
@@ -101,9 +99,7 @@ _KEYBAR_ENTRIES: list[tuple[str, str]] = [
     ("L", "data feed"),
     ("C", "sys.config"),
     ("S", "density"),
-    ("?", "help.sys"),
     ("F", "freeze"),
-    ("↑/↓", "scroll"),
 ]
 
 # Approval action shown only when awaiting approval.
@@ -114,12 +110,13 @@ _HELP_LINES: list[tuple[str, str]] = [
     ("Q",     "jack out  (confirm if run active)"),
     ("R",     "reboot current run"),
     ("M",     "cycle pipeline mode"),
+    ("← / →", "cycle pane focus"),
     ("L",     "toggle data-feed view"),
     ("C",     "toggle sys.config view"),
     ("S",     "toggle compact deck density"),
     ("?",     "toggle help.sys overlay"),
-    ("F",     "freeze / unfreeze autoscroll"),
-    ("↑ / ↓", "scroll the data feed"),
+    ("F",     "freeze / unfreeze focused live pane"),
+    ("↑ / ↓", "scroll focused pane"),
     ("A",     "AUTHORIZE  (awaiting approval only)"),
     ("Esc",   "abort jack-out"),
 ]
@@ -168,7 +165,14 @@ class StageTimingLiveTable:
         """Return the current (name, timing) tuple for *stage_id*, if any."""
         return self._rows.get(stage_id)
 
-    def render(self) -> Panel:
+    def render(
+        self,
+        *,
+        border_style: str = _C_BORDER,
+        title: str | None = None,
+        scroll_offset: int = 0,
+        max_rows: int | None = None,
+    ) -> Panel:
         """Return a Panel containing the live timing table."""
         table = Table.grid(padding=(0, 1))
         table.add_column("Stage", style=_C_NEON_PINK, no_wrap=True)
@@ -185,6 +189,14 @@ class StageTimingLiveTable:
             )
         else:
             sorted_rows = sorted(self._rows.items(), key=lambda item: item[1][1].started_at)
+            if max_rows is not None:
+                offset = max(0, min(scroll_offset, max(0, len(sorted_rows) - 1)))
+                if offset == 0:
+                    sorted_rows = sorted_rows[-max_rows:]
+                else:
+                    end = max(0, len(sorted_rows) - offset)
+                    start = max(0, end - max_rows)
+                    sorted_rows = sorted_rows[start:end]
             for stage_id, (name, timing) in sorted_rows:
                 symbol, color = self._STATUS_STYLE.get(timing.status, ("●", _C_NEON_CYAN))
                 duration = f"{timing.duration_ms / 1000:.1f}s" if timing.duration_ms is not None else "–"
@@ -196,7 +208,7 @@ class StageTimingLiveTable:
                     Text(timing.status or "unknown", style=color),
                 )
 
-        return Panel(table, title=self._title, border_style=_C_BORDER, padding=(0, 1))
+        return Panel(table, title=title or self._title, border_style=border_style, padding=(0, 1))
 
     @staticmethod
     def _format_range(start: str, end: str) -> str:
@@ -224,9 +236,14 @@ class _RendererState:
     awaiting_approval: bool = False
     # Keyboard-driven UI state
     view_mode: str = "normal"   # normal | logs | config | help
-    scroll_offset: int = 0      # lines scrolled up from the bottom
-    autoscroll: bool = True     # False when user has scrolled up
-    compact: bool = False       # compact stage list density
+    focused_panel: str = "none"  # none | deck | data | stage | agent
+    deck_scroll_offset: int = 0
+    data_scroll_offset: int = 0
+    data_autoscroll: bool = True
+    stage_scroll_offset: int = 0
+    agent_scroll_offset: int = 0
+    agent_autoscroll: bool = True
+    compact: bool = True        # compact stage list density
     quit_confirm: bool = False  # True while awaiting quit confirmation
     # In-TUI input state (set when pipeline needs user input)
     input_prompt: str | None = None
@@ -272,6 +289,10 @@ class _KeyboardPoller:
                         self._callback("up")
                     elif ch2 == b"P":
                         self._callback("down")
+                    elif ch2 == b"K":
+                        self._callback("left")
+                    elif ch2 == b"M":
+                        self._callback("right")
                 else:
                     try:
                         self._callback(ch.decode("utf-8", errors="ignore"))
@@ -305,6 +326,10 @@ class _KeyboardPoller:
                             self._callback("up")
                         elif next2 == "B":
                             self._callback("down")
+                        elif next2 == "D":
+                            self._callback("left")
+                        elif next2 == "C":
+                            self._callback("right")
                     else:
                         # Plain ESC (or unrecognised sequence).
                         self._callback("\x1b")
@@ -346,6 +371,7 @@ class RichLiveRenderer:
         console: Console | None = None,
         refresh_per_second: int = 4,
         enable_keyboard: bool = True,
+        version: str = "0.1.8",
         on_quit: Callable[[], None] | None = None,
         on_restart: Callable[[], None] | None = None,
         on_approve: Callable[[], None] | None = None,
@@ -353,6 +379,7 @@ class RichLiveRenderer:
         self._console = console or Console()
         self._refresh_per_second = refresh_per_second
         self._enable_keyboard = enable_keyboard
+        self._version = version
         self._on_quit = on_quit
         self._on_restart = on_restart
         self._on_approve = on_approve
@@ -532,6 +559,12 @@ class RichLiveRenderer:
                 if isinstance(details, dict):
                     self._mode_details = dict(details)
 
+        elif key in ("left", "right"):
+            if state.view_mode == "normal":
+                current_idx = self._FOCUS_ORDER.index(state.focused_panel)
+                step = -1 if key == "left" else 1
+                state.focused_panel = self._FOCUS_ORDER[(current_idx + step) % len(self._FOCUS_ORDER)]
+
         elif key_norm == "l":
             state.view_mode = "normal" if state.view_mode == "logs" else "logs"
 
@@ -545,18 +578,20 @@ class RichLiveRenderer:
             state.view_mode = "normal" if state.view_mode == "help" else "help"
 
         elif key_norm == "f":
-            state.autoscroll = not state.autoscroll
-            if state.autoscroll:
-                state.scroll_offset = 0
+            if state.focused_panel == "data":
+                state.data_autoscroll = not state.data_autoscroll
+                if state.data_autoscroll:
+                    state.data_scroll_offset = 0
+            elif state.focused_panel == "agent":
+                state.agent_autoscroll = not state.agent_autoscroll
+                if state.agent_autoscroll:
+                    state.agent_scroll_offset = 0
 
         elif key == "up":
-            state.autoscroll = False
-            state.scroll_offset += 1
+            self._scroll_panel(state.focused_panel, 1)
 
         elif key == "down":
-            state.scroll_offset = max(0, state.scroll_offset - 1)
-            if state.scroll_offset == 0:
-                state.autoscroll = True
+            self._scroll_panel(state.focused_panel, -1)
 
         elif key_norm == "a" and state.awaiting_approval:
             if self._on_approve is not None:
@@ -565,6 +600,53 @@ class RichLiveRenderer:
     def _trigger_quit(self) -> None:
         if self._on_quit is not None:
             self._on_quit()
+
+    def _scroll_panel(self, panel: str, delta: int) -> None:
+        state = self._state
+        if panel == "deck":
+            state.deck_scroll_offset = max(0, state.deck_scroll_offset + delta)
+            return
+        if panel == "stage":
+            state.stage_scroll_offset = max(0, state.stage_scroll_offset + delta)
+            return
+        if panel == "data":
+            if delta > 0:
+                state.data_autoscroll = False
+                state.data_scroll_offset += delta
+            else:
+                state.data_scroll_offset = max(0, state.data_scroll_offset + delta)
+                if state.data_scroll_offset == 0:
+                    state.data_autoscroll = True
+            return
+        if panel == "agent":
+            if delta > 0:
+                state.agent_autoscroll = False
+                state.agent_scroll_offset += delta
+            else:
+                state.agent_scroll_offset = max(0, state.agent_scroll_offset + delta)
+                if state.agent_scroll_offset == 0:
+                    state.agent_autoscroll = True
+
+    def _is_focused(self, panel: str) -> bool:
+        return self._state.view_mode == "normal" and self._state.focused_panel == panel
+
+    def _panel_border_style(self, panel: str) -> str:
+        return _C_NEON_CYAN if self._is_focused(panel) else _C_BORDER
+
+    def _panel_title(self, panel: str, title: str) -> str:
+        marker = "▶ " if self._is_focused(panel) else ""
+        return f"[bold #ff2d6f]{marker}{title}[/bold #ff2d6f]"
+
+    @staticmethod
+    def _window_slice(items: list, scroll_offset: int, max_rows: int) -> list:
+        if not items:
+            return items
+        offset = max(0, min(scroll_offset, max(0, len(items) - 1)))
+        if offset == 0:
+            return items[-max_rows:]
+        end = max(0, len(items) - offset)
+        start = max(0, end - max_rows)
+        return items[start:end]
 
     # -----------------------------------------------------------------------------
     # Event to state
@@ -579,6 +661,12 @@ class RichLiveRenderer:
             state.mode = event.mode
             state.started_at = time.monotonic()
             state.awaiting_approval = False
+            state.deck_scroll_offset = 0
+            state.data_scroll_offset = 0
+            state.data_autoscroll = True
+            state.stage_scroll_offset = 0
+            state.agent_scroll_offset = 0
+            state.agent_autoscroll = True
             state.agent_output.clear()
             state.agent_name = ""
             self._timing_table = StageTimingLiveTable()
@@ -654,13 +742,15 @@ class RichLiveRenderer:
 
         elif isinstance(event, LogLine):
             state.logs.append(event)
-            if state.autoscroll:
-                state.scroll_offset = 0
+            if state.data_autoscroll:
+                state.data_scroll_offset = 0
 
         elif isinstance(event, AgentOutput):
             if event.agent and event.agent != state.agent_name:
                 state.agent_name = event.agent
             state.agent_output.append(event.line)
+            if state.agent_autoscroll:
+                state.agent_scroll_offset = 0
 
         elif isinstance(event, TaskStarted):
             state.tasks.append(
@@ -805,22 +895,28 @@ class RichLiveRenderer:
             return Panel(bar, border_style=_C_BORDER, padding=(0, 1))
 
         bar.append("  ▸ A.I.N.", style=_C_NEON_PINK)
-        bar.append(f" v{_VERSION}", style=_C_DIM_CYAN)
+        bar.append(f" v{self._version}", style=_C_DIM_CYAN)
         bar.append("  ║  ", style=_C_NEON_PINK)
         bar.append("SYS:", style=_C_NEON_PINK)
         bar.append(f" {state.run_status.upper().replace('_', '.')}", style=run_color)
         bar.append("  ║  ", style=_C_NEON_PINK)
         bar.append("UPTIME:", style=_C_NEON_PINK)
         bar.append(f" {elapsed}", style=_C_NEON_CYAN)
+        bar.append("  ║  ", style=_C_NEON_PINK)
+        bar.append("MODE:", style=_C_NEON_PINK)
+        bar.append(f" {self._mode_details.get('key', 'default')}", style=_C_NEON_CYAN)
 
         if state.run_id:
             bar.append("  ║  ", style=_C_NEON_PINK)
             bar.append("NODE:", style=_C_NEON_PINK)
             bar.append(f" {state.run_id[:8]}", style=_C_NEON_CYAN)
 
-        if not state.autoscroll:
+        if not state.data_autoscroll:
             bar.append("  ║  ", style=_C_NEON_PINK)
-            bar.append("⏸ FEED FROZEN", style=_C_NEON_PINK)
+            bar.append("⏸ DATA FROZEN", style=_C_NEON_PINK)
+        if not state.agent_autoscroll:
+            bar.append("  ║  ", style=_C_NEON_PINK)
+            bar.append("⏸ AGENT FROZEN", style=_C_NEON_PINK)
 
         return Panel(bar, border_style=_C_BORDER, padding=(0, 1))
 
@@ -830,16 +926,20 @@ class RichLiveRenderer:
         "done":    ("◆", _C_NEON_CYAN),
         "failed":  ("✖", _C_NEON_CYAN),
     }
+    _FOCUS_ORDER: tuple[str, ...] = ("none", "deck", "data", "stage", "agent")
 
     def _build_pipeline_panel(self) -> Panel:
         table = Table.grid(padding=(0, 1))
-        table.add_column(justify="right", no_wrap=True)   # symbol / indent
-        table.add_column(justify="left", no_wrap=False)   # name + timing
+        table.add_column(justify="right", no_wrap=True)
+        table.add_column(justify="left", no_wrap=False)
+        rows: list[tuple[Text, Text]] = []
 
         if not self._state.stages:
-            table.add_row(
-                Text("◈", style=_C_DIM_CYAN),
-                Text("awaiting deck init...", style=_C_DIM_CYAN),
+            rows.append(
+                (
+                    Text("◈", style=_C_DIM_CYAN),
+                    Text("awaiting deck init...", style=_C_DIM_CYAN),
+                )
             )
         else:
             active_tasks = self._state.tasks
@@ -853,9 +953,8 @@ class RichLiveRenderer:
                     )
                 if not self._state.compact and entry.error:
                     name_text.append(f"\n  ERR: {entry.error}", style=_C_NEON_CYAN)
-                table.add_row(Text(symbol, style=color), name_text)
+                rows.append((Text(symbol, style=color), name_text))
 
-                # Sub-rows: concurrent agent tasks under running stage.
                 if entry.status == "running" and active_tasks and not self._state.compact:
                     for task in active_tasks:
                         t_sym, t_color = self._TASK_STYLE.get(task.status, ("▷", "#2EDCD1"))
@@ -869,18 +968,21 @@ class RichLiveRenderer:
                             task_text.append(f"  {task.duration_ms / 1000:.1f}s", style=_C_DIM_CYAN)
                         if task.error:
                             task_text.append(f"  {task.error}", style=_C_NEON_CYAN)
-                        table.add_row(
-                            Text(f"  {t_sym}", style=t_color),
-                            task_text,
-                        )
+                        rows.append((Text(f"  {t_sym}", style=t_color), task_text))
 
-        title = "[bold #ff2d6f]// DECK[/bold #ff2d6f]"
-        if self._state.compact:
-            title += " [dim #23A19F](compact)[/dim #23A19F]"
-        return Panel(table, title=title, border_style=_C_BORDER, padding=(0, 1))
+        for icon, content in self._window_slice(rows, self._state.deck_scroll_offset, self._panel_lines()):
+            table.add_row(icon, content)
+
+        title = self._panel_title("deck", "// DECK")
+        return Panel(table, title=title, border_style=self._panel_border_style("deck"), padding=(0, 1))
 
     def _build_timing_panel(self) -> Panel:
-        return self._timing_table.render()
+        return self._timing_table.render(
+            border_style=self._panel_border_style("stage"),
+            title=self._panel_title("stage", "// STAGE.TIMINGS"),
+            scroll_offset=self._state.stage_scroll_offset,
+            max_rows=self._panel_lines(),
+        )
 
     def _build_stream_panel(self) -> Panel:
         table = Table.grid(padding=(0, 1))
@@ -890,11 +992,7 @@ class RichLiveRenderer:
 
         logs = list(self._state.logs)
 
-        if self._state.autoscroll or self._state.scroll_offset == 0:
-            visible = logs
-        else:
-            end = max(0, len(logs) - self._state.scroll_offset)
-            visible = logs[:end]
+        visible = self._window_slice(logs, self._state.data_scroll_offset, self._panel_lines())
 
         for log in visible:
             ts_str = log.ts[11:19] if len(log.ts) >= 19 else log.ts
@@ -914,11 +1012,11 @@ class RichLiveRenderer:
                 Text("// awaiting data transmission...", style=_C_NEON_CYAN),
             )
 
-        title = "[bold #ff2d6f]// DATA FEED[/bold #ff2d6f]"
-        if not self._state.autoscroll:
-            offset = self._state.scroll_offset
+        title = self._panel_title("data", "// DATA FEED")
+        if not self._state.data_autoscroll:
+            offset = self._state.data_scroll_offset
             title += f" [bold #ff2d6f]⏸ +{offset}[/bold #ff2d6f]"
-        return Panel(table, title=title, border_style=_C_BORDER, padding=(0, 1))
+        return Panel(table, title=title, border_style=self._panel_border_style("data"), padding=(0, 1))
 
     def _panel_lines(self) -> int:
         """Approximate content lines for half-height right-column panels."""
@@ -934,7 +1032,7 @@ class RichLiveRenderer:
         if not lines:
             body: Text | str = Text("No agent running.", style=f"dim {_C_PRIMARY_TEXT}")
         else:
-            visible = lines[-self._panel_lines():]
+            visible = self._window_slice(lines, self._state.agent_scroll_offset, self._panel_lines())
             body = Text()
             for idx, line in enumerate(visible):
                 if idx:
@@ -943,8 +1041,8 @@ class RichLiveRenderer:
 
         return Panel(
             body,
-            title=f"[bold #ff2d6f]{title}[/bold #ff2d6f]",
-            border_style=_C_BORDER,
+            title=self._panel_title("agent", title),
+            border_style=self._panel_border_style("agent"),
             padding=(0, 1),
         )
 
@@ -981,7 +1079,7 @@ class RichLiveRenderer:
         entries = list(_KEYBAR_ENTRIES)
 
         entries = [
-            (k, "unfreeze" if k == "F" and not state.autoscroll else d)
+            (k, "unfreeze" if k == "F" and self._focused_panel_frozen() else d)
             for k, d in entries
         ]
 
@@ -991,19 +1089,56 @@ class RichLiveRenderer:
         bar = Text()
         for i, (key, desc) in enumerate(entries):
             if i > 0:
-                bar.append("  ", style="")
+                bar.append(" ", style="")
             bar.append(f" {key} ", style="bold #ff2d6f")
             bar.append(f" {desc}", style=_C_DIM_CYAN)
 
         bar.append("\n")
+        bar.append(" FOCUS ", style="bold #ff2d6f")
+        bar.append(state.focused_panel.upper(), style=f"bold {_C_PRIMARY_TEXT}")
+        bar.append("  |  ", style="#ff2d6f")
+        bar.append(self._focus_hint(), style=_C_SECONDARY_TEXT)
+        bar.append("  ", style="")
+        bar.append(" ? ", style="bold #ff2d6f")
+        bar.append(" help.sys", style=_C_DIM_CYAN)
+        bar.append("  ", style="")
+        bar.append(" ←/→ ", style="bold #ff2d6f")
+        bar.append(" focus pane", style=_C_DIM_CYAN)
+        bar.append("  ", style="")
+        bar.append(" ↑/↓ ", style="bold #ff2d6f")
+        bar.append(" scroll", style=_C_DIM_CYAN)
+        bar.append("\n")
         bar.append(" MODE ", style="bold #ff2d6f")
         bar.append(self._mode_details.get("key", "default"), style=f"bold {_C_PRIMARY_TEXT}")
         bar.append("  |  ", style="#ff2d6f")
+        bar.append(self._mode_details.get("label", ""), style=_C_SECONDARY_TEXT)
+        bar.append("  |  ", style="#ff2d6f")
+        bar.append("FLOW ", style="bold #ff2d6f")
         bar.append(self._mode_details.get("summary", ""), style=_C_SECONDARY_TEXT)
         bar.append("\n")
         bar.append("─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────", style="#ff2d6f")
 
         return Panel(bar, border_style=_C_BORDER, padding=(0, 1))
+
+    def _focused_panel_frozen(self) -> bool:
+        state = self._state
+        if state.focused_panel == "data":
+            return not state.data_autoscroll
+        if state.focused_panel == "agent":
+            return not state.agent_autoscroll
+        return False
+
+    def _focus_hint(self) -> str:
+        state = self._state
+        if state.focused_panel == "deck":
+            return f"rows +{state.deck_scroll_offset}"
+        if state.focused_panel == "stage":
+            return f"rows +{state.stage_scroll_offset}"
+        if state.focused_panel == "data":
+            return "live" if state.data_autoscroll else f"rows +{state.data_scroll_offset}"
+        if state.focused_panel == "agent":
+            return "live" if state.agent_autoscroll else f"rows +{state.agent_scroll_offset}"
+        return ""
 
     def _build_input_panel(self) -> Panel:
         """In-TUI input bar - replaces keybar when pipeline needs user input."""

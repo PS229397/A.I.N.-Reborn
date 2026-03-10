@@ -556,6 +556,180 @@ def ensure_config() -> None:
         info(f"Created default config: {CONFIG_FILE.relative_to(REPO_ROOT)}")
 
 
+def _flatten_dict(data: dict[str, Any], prefix: str = "") -> list[tuple[str, Any]]:
+    items: list[tuple[str, Any]] = []
+    for key in sorted(data):
+        value = data[key]
+        path = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            items.extend(_flatten_dict(value, path))
+        else:
+            items.append((path, value))
+    return items
+
+
+def _config_lookup(config: dict[str, Any], dotted_key: str) -> tuple[dict[str, Any], str]:
+    parts = dotted_key.split(".")
+    current: dict[str, Any] = config
+    for part in parts[:-1]:
+        value = current.get(part)
+        if not isinstance(value, dict):
+            raise KeyError(dotted_key)
+        current = value
+    return current, parts[-1]
+
+
+def _config_value(config: dict[str, Any], dotted_key: str) -> Any:
+    parent, leaf = _config_lookup(config, dotted_key)
+    if leaf not in parent:
+        raise KeyError(dotted_key)
+    return parent[leaf]
+
+
+def _parse_config_value(raw: str) -> Any:
+    lowered = raw.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if lowered == "null":
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def _reset_config_key(config: dict[str, Any], dotted_key: str) -> bool:
+    try:
+        default_value = _config_value(DEFAULT_CONFIG, dotted_key)
+    except KeyError:
+        parent, leaf = _config_lookup(config, dotted_key)
+        if leaf not in parent:
+            return False
+        del parent[leaf]
+        return True
+
+    parent, leaf = _config_lookup(config, dotted_key)
+    parent[leaf] = copy.deepcopy(default_value)
+    return True
+
+
+def _print_json(payload: Any) -> None:
+    print(json.dumps(payload, indent=2))
+
+
+def _try_parse_log_line(text: str) -> tuple[str | None, str]:
+    match = re.match(r"^\[(?P<ts>[^\]]+)\]\s*(?P<message>.*)$", text.rstrip())
+    if match:
+        return match.group("ts"), match.group("message")
+    return None, text.rstrip()
+
+
+def _detect_log_level(message: str) -> str:
+    lowered = message.lower()
+    if "error" in lowered or "failed" in lowered:
+        return "error"
+    if "warn" in lowered:
+        return "warn"
+    if "debug" in lowered:
+        return "debug"
+    return "info"
+
+
+def _load_log_entries() -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    files: list[tuple[Path, str]] = [
+        (LOGS_DIR / "pipeline.log", "pipeline"),
+        (LOGS_DIR / "validation.log", "validation"),
+    ]
+    agents_dir = LOGS_DIR / "agents"
+    if agents_dir.exists():
+        for path in sorted(agents_dir.glob("*.log")):
+            files.append((path, "agent"))
+
+    for path, source in files:
+        if not path.exists():
+            continue
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for raw_line in handle:
+                timestamp, message = _try_parse_log_line(raw_line)
+                entries.append(
+                    {
+                        "timestamp": timestamp or "",
+                        "level": _detect_log_level(message),
+                        "source": source,
+                        "message": message,
+                        "path": str(path),
+                    }
+                )
+
+    entries.sort(key=lambda entry: (entry["timestamp"], entry["path"], entry["message"]))
+    return entries
+
+
+def _show_logs(
+    *,
+    follow: bool = False,
+    tail: int = 50,
+    level: str | None = None,
+    source: str | None = None,
+    as_json: bool = False,
+) -> None:
+    while True:
+        entries = _load_log_entries()
+        if source:
+            entries = [entry for entry in entries if entry["source"] == source]
+        if level:
+            entries = [entry for entry in entries if entry["level"] == level]
+        visible = entries[-tail:] if tail > 0 else entries
+        if as_json:
+            _print_json(visible)
+        else:
+            for entry in visible:
+                ts = f"[{entry['timestamp']}] " if entry["timestamp"] else ""
+                print(f"{ts}{entry['source']} {entry['level']}: {entry['message']}")
+        if not follow:
+            return
+        time.sleep(1)
+
+
+def _show_config_list() -> None:
+    config = load_config()
+    for key, value in _flatten_dict(config):
+        rendered = json.dumps(value) if isinstance(value, (dict, list, bool)) or value is None else value
+        print(f"{key} = {rendered}")
+
+
+def _show_config_get(key: str) -> None:
+    value = _config_value(load_config(), key)
+    if isinstance(value, (dict, list)):
+        _print_json(value)
+    else:
+        print(json.dumps(value) if isinstance(value, bool) or value is None else value)
+
+
+def _show_version(short: bool = False) -> None:
+    from ain import __version__
+
+    version = __version__
+    commit = None
+    try:
+        commit = run_command_output(["git", "rev-parse", "--short", "HEAD"]).strip()
+    except Exception:
+        commit = None
+
+    if short:
+        print(version)
+        return
+
+    if commit:
+        print(f"ain {version} ({commit})")
+        return
+
+    print(f"ain {version}")
+
+
 def get_available_pipeline_modes(config: dict[str, Any]) -> list[str]:
     configured = (
         ((config.get("pipeline_mode") or {}).get("available"))
@@ -3412,6 +3586,44 @@ def main() -> None:
     resume_parser.add_argument("--plain", action="store_true", help="Disable TUI; print plain output")
 
     subparsers.add_parser("continue", help="Continue from paused/failed/interrupted state")
+    approve_parser = subparsers.add_parser("approve", help="Approve planning artifacts")
+    approve_parser.add_argument("--run-id", metavar="ID", help="Reserved for compatibility", default=None)
+
+    status_parser = subparsers.add_parser("status", help="Show pipeline status")
+    status_parser.add_argument("--json", action="store_true", help="Emit machine-readable status JSON")
+
+    reset_parser = subparsers.add_parser("reset", help="Reset pipeline state")
+    reset_parser.add_argument("--hard", action="store_true", help="Remove generated files and logs")
+    reset_parser.add_argument("--yes", action="store_true", help="Confirm hard reset without prompting")
+
+    logs_parser = subparsers.add_parser("logs", help="View merged logs")
+    logs_parser.add_argument("--follow", action="store_true", help="Follow logs continuously")
+    logs_parser.add_argument("--tail", type=int, default=50, metavar="N", help="Show the last N lines")
+    logs_parser.add_argument(
+        "--level",
+        choices=["debug", "info", "warn", "error"],
+        help="Filter by log level",
+    )
+    logs_parser.add_argument(
+        "--source",
+        choices=["pipeline", "validation", "agent"],
+        help="Filter by log source",
+    )
+    logs_parser.add_argument("--json", action="store_true", help="Emit logs as JSON")
+
+    config_parser = subparsers.add_parser("config", help="Manage project configuration")
+    config_subparsers = config_parser.add_subparsers(dest="config_command")
+    config_subparsers.add_parser("list", help="List current config keys and values")
+    config_get_parser = config_subparsers.add_parser("get", help="Show a config value")
+    config_get_parser.add_argument("key", metavar="KEY")
+    config_set_parser = config_subparsers.add_parser("set", help="Set a config value")
+    config_set_parser.add_argument("key", metavar="KEY")
+    config_set_parser.add_argument("value", metavar="VALUE")
+    config_reset_parser = config_subparsers.add_parser("reset", help="Reset one key or the whole config")
+    config_reset_parser.add_argument("key", metavar="KEY", nargs="?")
+
+    version_parser = subparsers.add_parser("version", help="Show CLI version")
+    version_parser.add_argument("--short", action="store_true", help="Only print the semantic version")
 
     # Global flags (no subcommand)
     parser.add_argument("--status",  action="store_true", help="Show pipeline status")
@@ -3428,7 +3640,15 @@ def main() -> None:
         run_init()
         return
 
-    if args.reset:
+    if args.command == "reset" and getattr(args, "hard", False):
+        if not getattr(args, "yes", False):
+            error("Hard reset requires --yes.")
+            sys.exit(2)
+        banner("A.I.N. Pipeline - Reset")
+        clean_workspace()
+        return
+
+    if args.reset or args.command == "reset":
         save_state(_default_state(load_config()))
         if PLANNING_APPROVED_FLAG.exists():
             PLANNING_APPROVED_FLAG.unlink()
@@ -3440,7 +3660,7 @@ def main() -> None:
         clean_workspace()
         return
 
-    if args.approve:
+    if args.approve or args.command == "approve":
         APPROVALS_DIR.mkdir(parents=True, exist_ok=True)
         approved_at = datetime.now(timezone.utc).isoformat()
         PLANNING_APPROVED_FLAG.write_text(f"Approved: {approved_at}\n", encoding="utf-8")
@@ -3452,8 +3672,59 @@ def main() -> None:
             success("Advanced to implementation. Run: ain run")
         return
 
-    if args.status:
-        show_status(load_state())
+    if args.status or args.command == "status":
+        state = load_state()
+        if getattr(args, "json", False):
+            payload = {
+                "pipeline_state": state,
+                "health": config_service.get_health_summary(REPO_ROOT).__dict__,
+            }
+            _print_json(payload)
+        else:
+            show_status(state)
+        return
+
+    if args.command == "logs":
+        _show_logs(
+            follow=getattr(args, "follow", False),
+            tail=getattr(args, "tail", 50),
+            level=getattr(args, "level", None),
+            source=getattr(args, "source", None),
+            as_json=getattr(args, "json", False),
+        )
+        return
+
+    if args.command == "config":
+        ensure_config()
+        if args.config_command == "list":
+            _show_config_list()
+            return
+        if args.config_command == "get":
+            _show_config_get(args.key)
+            return
+        if args.config_command == "set":
+            config = load_config()
+            parent, leaf = _config_lookup(config, args.key)
+            parent[leaf] = _parse_config_value(args.value)
+            save_config(config)
+            success(f"Updated {args.key}.")
+            return
+        if args.config_command == "reset":
+            if args.key is None:
+                save_config(copy.deepcopy(DEFAULT_CONFIG))
+                success("Config reset to defaults.")
+                return
+            config = load_config()
+            if not _reset_config_key(config, args.key):
+                error(f"Unknown config key: {args.key}")
+                sys.exit(2)
+            save_config(config)
+            success(f"Reset {args.key}.")
+            return
+        parser.error("config requires a subcommand")
+
+    if args.command == "version":
+        _show_version(short=getattr(args, "short", False))
         return
 
     if args.command == "run":
