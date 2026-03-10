@@ -4,6 +4,8 @@ A local multi-agent orchestrator for structured, reproducible AI-assisted develo
 
 It coordinates architecture, planning, task generation, implementation, and validation through deterministic stages, with a required approval gate before implementation.
 
+![A.I.N. Pipeline TUI screenshot](assets/tui-screenshot.png)
+
 ---
 
 ## Installation
