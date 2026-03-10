@@ -4419,15 +4419,14 @@ def _run_with_tui(
                     choice = renderer.request_input(
                         "SUCCESS: pipeline completed. [N] new AIN session, [Q] quit"
                     ).strip().lower()
+                    clean_workspace(silent=True)
                     if choice == "n":
-                        clean_workspace(silent=True)
                         save_state(_default_state(load_config()))
                         if PLANNING_APPROVED_FLAG.exists():
                             PLANNING_APPROVED_FLAG.unlink()
                         next_start_stage = None
                         next_single_stage = False
                         continue
-                    clean_workspace(silent=True)
                     break
             except SystemExit as exc:
                 exit_code = exc.code if isinstance(exc.code, int) else 1
