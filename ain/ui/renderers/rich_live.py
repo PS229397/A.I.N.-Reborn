@@ -19,6 +19,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Deque
 
@@ -309,7 +310,9 @@ class RichLiveRenderer:
         self._state = _RendererState()
         self._live: Live | None = None
         self._kbd: _KeyboardPoller | None = None
+        self._ticker: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._running = False
         self._mode_details: dict[str, str] = {
             "key": "default",
             "label": "Default",
@@ -341,6 +344,7 @@ class RichLiveRenderer:
         self._state = _RendererState()
         self._input_ready.clear()
         self._input_result = ""
+        self._running = True
         self._live = Live(
             self._render_root(),
             console=self._console,
@@ -351,6 +355,8 @@ class RichLiveRenderer:
         if self._enable_keyboard:
             self._kbd = _KeyboardPoller(self._handle_key)
             self._kbd.start()
+        self._ticker = threading.Thread(target=self._tick_loop, daemon=True)
+        self._ticker.start()
 
     def request_input(self, prompt: str) -> str:
         """Show an input bar in the TUI and block until the user presses Enter.
@@ -401,6 +407,7 @@ class RichLiveRenderer:
 
     def stop(self, result: RunStatus | None = None) -> None:
         """Stop the Rich Live display and keyboard poller."""
+        self._running = False
         if self._kbd is not None:
             self._kbd.stop()
             self._kbd = None
@@ -412,6 +419,13 @@ class RichLiveRenderer:
                 self._live.update(self._render_root())
                 self._live.stop()
                 self._live = None
+
+    def _tick_loop(self) -> None:
+        while self._running:
+            time.sleep(1)
+            with self._lock:
+                if self._live is not None:
+                    self._live.update(self._render_root())
 
     # -----------------------------------------------------------------------------
     # Keyboard state
@@ -965,7 +979,7 @@ class RichLiveRenderer:
         visible = self._window_slice(logs, self._state.data_scroll_offset, self._stream_panel_lines())
 
         for log in visible:
-            ts_str = log.ts[11:19] if len(log.ts) >= 19 else log.ts
+            ts_str = _short_ts(log.ts)
             level_color = _LEVEL_COLOR.get(log.level, "#2EDCD1")
             label = Text()
             label.append(f"[{log.level.value.upper()[:3]}]", style=level_color)
@@ -1150,7 +1164,12 @@ class RichLiveRenderer:
 
 
 def _short_ts(ts: str) -> str:
-    """Return a compact time component from an ISO timestamp string."""
-    return ts[11:19] if len(ts) >= 19 else ts
+    """Return a compact local-system time from an ISO timestamp string."""
+    try:
+        normalized = ts.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        return parsed.astimezone().strftime("%H:%M:%S")
+    except Exception:
+        return ts[11:19] if len(ts) >= 19 else ts
 
 
