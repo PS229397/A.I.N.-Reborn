@@ -13,11 +13,13 @@ Layout (top -> bottom):
 
 from __future__ import annotations
 
+import json
 import sys
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Deque
 
 from rich.console import Console
@@ -28,7 +30,6 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from ain.models.state import StageTiming
 from ain.runtime.events import (
     AnyEvent,
     AgentOutput,
@@ -64,6 +65,7 @@ _C_DIM_CYAN   = _C_SECONDARY_TEXT
 
 # Single border colour used on every panel for visual consistency.
 _C_BORDER     = "#ff2d6f"
+_TASK_GRAPH_FILE = Path.cwd() / "docs" / "TASK_GRAPH.json"
 
 # Stage status -> (symbol, Rich color)
 _STAGE_STYLE: dict[str, tuple[str, str]] = {
@@ -136,89 +138,10 @@ class _StageEntry:
 class _TaskEntry:
     task_id: str
     description: str
-    agent: str
-    status: str = "running"   # running | done | failed
+    agent: str = ""
+    status: str = "pending"   # pending | running | done | failed
     duration_ms: int | None = None
     error: str | None = None
-
-
-class StageTimingLiveTable:
-    """Maintains per-stage timing data and renders a Rich table."""
-
-    _STATUS_STYLE: dict[str, tuple[str, str]] = {
-        "success": ("●", _C_NEON_CYAN),
-        "failed":  ("✖", _C_NEON_RED),
-        "skipped": ("➜", _C_DIM_CYAN),
-    }
-
-    def __init__(self, title: str = "[bold #ff2d6f]// STAGE.TIMINGS[/bold #ff2d6f]") -> None:
-        self._title = title
-        self._rows: dict[str, tuple[str, StageTiming]] = {}
-
-    def upsert(self, stage_id: str, timing: StageTiming, stage_name: str | None = None) -> None:
-        """Insert or update timing data for *stage_id*."""
-        current_name = self._rows.get(stage_id, (stage_id, timing))[0]
-        name = stage_name or current_name or stage_id
-        self._rows[stage_id] = (name, timing)
-
-    def get(self, stage_id: str) -> tuple[str, StageTiming] | None:
-        """Return the current (name, timing) tuple for *stage_id*, if any."""
-        return self._rows.get(stage_id)
-
-    def render(
-        self,
-        *,
-        border_style: str = _C_BORDER,
-        title: str | None = None,
-        scroll_offset: int = 0,
-        max_rows: int | None = None,
-    ) -> Panel:
-        """Return a Panel containing the live timing table."""
-        table = Table.grid(padding=(0, 1))
-        table.add_column("Stage", style=_C_NEON_PINK, no_wrap=True)
-        table.add_column("Window", style=_C_DIM_CYAN, no_wrap=False)
-        table.add_column("Duration", style=_C_NEON_CYAN, justify="right", no_wrap=True)
-        table.add_column("Status", style=_C_NEON_CYAN, no_wrap=True)
-
-        if not self._rows:
-            table.add_row(
-                Text("–", style=_C_DIM_CYAN),
-                Text("no timings recorded", style=_C_DIM_CYAN),
-                Text("–", style=_C_DIM_CYAN),
-                Text("–", style=_C_DIM_CYAN),
-            )
-        else:
-            sorted_rows = sorted(self._rows.items(), key=lambda item: item[1][1].started_at)
-            if max_rows is not None:
-                offset = max(0, min(scroll_offset, max(0, len(sorted_rows) - 1)))
-                if offset == 0:
-                    sorted_rows = sorted_rows[-max_rows:]
-                else:
-                    end = max(0, len(sorted_rows) - offset)
-                    start = max(0, end - max_rows)
-                    sorted_rows = sorted_rows[start:end]
-            for stage_id, (name, timing) in sorted_rows:
-                symbol, color = self._STATUS_STYLE.get(timing.status, ("●", _C_NEON_CYAN))
-                duration = f"{timing.duration_ms / 1000:.1f}s" if timing.duration_ms is not None else "–"
-                window = self._format_range(timing.started_at, timing.ended_at)
-                table.add_row(
-                    Text(f"{symbol} {name}", style=color),
-                    Text(window, style=_C_DIM_CYAN),
-                    Text(duration, style=_C_NEON_CYAN),
-                    Text(timing.status or "unknown", style=color),
-                )
-
-        return Panel(table, title=title or self._title, border_style=border_style, padding=(0, 1))
-
-    @staticmethod
-    def _format_range(start: str, end: str) -> str:
-        if start and end:
-            return f"{_short_ts(start)} -> {_short_ts(end)}"
-        if start and not end:
-            return f"{_short_ts(start)} -> …"
-        if end and not start:
-            return f"… -> {_short_ts(end)}"
-        return "–"
 
 
 @dataclass
@@ -229,7 +152,7 @@ class _RendererState:
     ended_at: float | None = None
     mode: str = "rich"
     stages: list[_StageEntry] = field(default_factory=list)
-    tasks: list[_TaskEntry] = field(default_factory=list)   # live task rows
+    tasks: list[_TaskEntry] = field(default_factory=list)   # task graph + live updates
     logs: Deque[LogLine] = field(default_factory=lambda: deque(maxlen=_MAX_LOG_LINES))
     agent_output: Deque[str] = field(default_factory=lambda: deque(maxlen=_MAX_LOG_LINES))
     agent_name: str = ""
@@ -384,7 +307,6 @@ class RichLiveRenderer:
         self._on_restart = on_restart
         self._on_approve = on_approve
         self._state = _RendererState()
-        self._timing_table = StageTimingLiveTable()
         self._live: Live | None = None
         self._kbd: _KeyboardPoller | None = None
         self._lock = threading.Lock()
@@ -417,7 +339,6 @@ class RichLiveRenderer:
     def start(self) -> None:
         """Start the Rich Live display and keyboard poller."""
         self._state = _RendererState()
-        self._timing_table = StageTimingLiveTable()
         self._input_ready.clear()
         self._input_result = ""
         self._live = Live(
@@ -667,9 +588,9 @@ class RichLiveRenderer:
             state.stage_scroll_offset = 0
             state.agent_scroll_offset = 0
             state.agent_autoscroll = True
+            state.tasks = self._load_task_entries()
             state.agent_output.clear()
             state.agent_name = ""
-            self._timing_table = StageTimingLiveTable()
 
         elif isinstance(event, StageQueued):
             state.stages.append(
@@ -687,49 +608,20 @@ class RichLiveRenderer:
             # Match legacy behaviour: clear agent output at stage boundaries.
             state.agent_output.clear()
             state.agent_name = ""
-            stage_name = event.stage_name or (entry.stage_name if entry is not None else event.stage_id)
-            timing = StageTiming(
-                stage_name=stage_name,
-                started_at=event.started_at,
-                ended_at="",
-                duration_ms=None,  # updated on completion
-                status="running",
-            )
-            self._timing_table.upsert(event.stage_id, timing, stage_name=stage_name)
 
         elif isinstance(event, StageCompleted):
             entry = self._find_stage(event.stage_id)
             if entry is not None:
                 entry.status = "done"
                 entry.duration_ms = event.duration_ms
-            existing = self._timing_table.get(event.stage_id)
-            started_at = existing[1].started_at if existing else ""
-            stage_name = event.stage_name or (existing[0] if existing else (entry.stage_name if entry else event.stage_id))
-            timing = StageTiming(
-                stage_name=stage_name,
-                started_at=started_at,
-                ended_at=event.ended_at,
-                duration_ms=event.duration_ms,
-                status=event.status or "success",
-            )
-            self._timing_table.upsert(event.stage_id, timing, stage_name=stage_name)
+            if event.stage_id == "task_creation":
+                state.tasks = self._load_task_entries()
 
         elif isinstance(event, StageFailed):
             entry = self._find_stage(event.stage_id)
             if entry is not None:
                 entry.status = "failed"
                 entry.error = event.error
-            existing = self._timing_table.get(event.stage_id)
-            started_at = existing[1].started_at if existing else ""
-            stage_name = event.stage_name or (existing[0] if existing else (entry.stage_name if entry else event.stage_id))
-            timing = StageTiming(
-                stage_name=stage_name,
-                started_at=started_at,
-                ended_at=getattr(event, "ended_at", "") if hasattr(event, "ended_at") else "",
-                duration_ms=existing[1].duration_ms if existing else None,
-                status="failed",
-            )
-            self._timing_table.upsert(event.stage_id, timing, stage_name=stage_name)
             state.run_status = "failed"
 
         elif isinstance(event, AwaitingApproval):
@@ -753,13 +645,17 @@ class RichLiveRenderer:
                 state.agent_scroll_offset = 0
 
         elif isinstance(event, TaskStarted):
-            state.tasks.append(
-                _TaskEntry(
+            entry = self._find_task(event.task_id)
+            if entry is None:
+                entry = _TaskEntry(
                     task_id=event.task_id,
                     description=event.description,
                     agent=event.agent,
                 )
-            )
+                state.tasks.append(entry)
+            entry.agent = event.agent
+            entry.status = "running"
+            entry.error = None
 
         elif isinstance(event, TaskCompleted):
             entry = self._find_task(event.task_id)
@@ -789,6 +685,27 @@ class RichLiveRenderer:
             if entry.task_id == task_id:
                 return entry
         return None
+
+    def _load_task_entries(self) -> list[_TaskEntry]:
+        if not _TASK_GRAPH_FILE.exists():
+            return []
+        try:
+            payload = json.loads(_TASK_GRAPH_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+
+        entries: list[_TaskEntry] = []
+        for task in payload.get("tasks", []):
+            status = str(task.get("status", "pending"))
+            entries.append(
+                _TaskEntry(
+                    task_id=str(task.get("id", "")),
+                    description=str(task.get("description", "")).strip(),
+                    status="done" if status == "completed" else status,
+                    duration_ms=None,
+                )
+            )
+        return entries
 
     # -----------------------------------------------------------------------------
     # Layout builders
@@ -859,7 +776,9 @@ class RichLiveRenderer:
         # Keep STAGE/AGENT sizes; shrink only DECK/DATA by 4 lines.
         estimated_body_height = base_body_height
         timing_size = max(6, (estimated_body_height * 4) // 7 - 1)
+        timing_size = max(6, timing_size - 2)
         agent_size = max(5, (estimated_body_height // 2) - 3)
+        agent_size += 1
         pipeline_size = max(5, body_size - timing_size)
         stream_size = max(5, body_size - agent_size)
         deck = Layout(name="deck", ratio=1)
@@ -878,6 +797,27 @@ class RichLiveRenderer:
             right,
         )
         return layout
+
+    def _default_body_metrics(self) -> dict[str, int]:
+        has_input = self._state.input_prompt is not None
+        base_body_height = max(
+            8,
+            self._console.size.height - 3 - 4 - (5 if has_input else 0),
+        )
+        body_size = max(8, base_body_height - 2)
+        estimated_body_height = base_body_height
+        timing_size = max(6, (estimated_body_height * 4) // 7 - 1)
+        timing_size = max(6, timing_size - 2)
+        agent_size = max(5, (estimated_body_height // 2) - 3)
+        agent_size += 1
+        pipeline_size = max(5, body_size - timing_size)
+        stream_size = max(5, body_size - agent_size)
+        return {
+            "pipeline_size": pipeline_size,
+            "timing_size": timing_size,
+            "stream_size": stream_size,
+            "agent_size": agent_size,
+        }
 
     def _build_status_bar(self) -> Panel:
         state = self._state
@@ -922,6 +862,7 @@ class RichLiveRenderer:
 
     # Task status -> (symbol, Rich color)
     _TASK_STYLE: dict[str, tuple[str, str]] = {
+        "pending": ("◦", _C_DIM_CYAN),
         "running": ("▷", "#2EDCD1"),
         "done":    ("◆", _C_NEON_CYAN),
         "failed":  ("✖", _C_NEON_CYAN),
@@ -932,13 +873,15 @@ class RichLiveRenderer:
         table = Table.grid(padding=(0, 1))
         table.add_column(justify="right", no_wrap=True)
         table.add_column(justify="left", no_wrap=False)
-        rows: list[tuple[Text, Text]] = []
+        table.add_column(justify="right", no_wrap=True)
+        rows: list[tuple[Text, Text, Text]] = []
 
         if not self._state.stages:
             rows.append(
                 (
                     Text("◈", style=_C_DIM_CYAN),
                     Text("awaiting deck init...", style=_C_DIM_CYAN),
+                    Text("", style=_C_DIM_CYAN),
                 )
             )
         else:
@@ -946,14 +889,13 @@ class RichLiveRenderer:
             for entry in sorted(self._state.stages, key=lambda e: e.index):
                 symbol, color = _STAGE_STYLE.get(entry.status, ("?", "#2EDCD1"))
                 name_text = Text(entry.stage_name, style=color)
-                if not self._state.compact and entry.duration_ms is not None:
-                    name_text.append(
-                        f"  {entry.duration_ms / 1000:.1f}s",
-                        style=_C_DIM_CYAN,
-                    )
                 if not self._state.compact and entry.error:
                     name_text.append(f"\n  ERR: {entry.error}", style=_C_NEON_CYAN)
-                rows.append((Text(symbol, style=color), name_text))
+                time_text = Text(
+                    f"{entry.duration_ms / 1000:.1f}s" if entry.duration_ms is not None else "",
+                    style=_C_DIM_CYAN,
+                )
+                rows.append((Text(symbol, style=color), name_text, time_text))
 
                 if entry.status == "running" and active_tasks and not self._state.compact:
                     for task in active_tasks:
@@ -964,24 +906,52 @@ class RichLiveRenderer:
                         task_text = Text()
                         task_text.append(desc, style=t_color)
                         task_text.append(f"  /{task.agent}/", style=_C_DIM_CYAN)
-                        if task.duration_ms is not None:
-                            task_text.append(f"  {task.duration_ms / 1000:.1f}s", style=_C_DIM_CYAN)
                         if task.error:
                             task_text.append(f"  {task.error}", style=_C_NEON_CYAN)
-                        rows.append((Text(f"  {t_sym}", style=t_color), task_text))
+                        task_time = Text(
+                            f"{task.duration_ms / 1000:.1f}s" if task.duration_ms is not None else "",
+                            style=_C_DIM_CYAN,
+                        )
+                        rows.append((Text(f"  {t_sym}", style=t_color), task_text, task_time))
 
-        for icon, content in self._window_slice(rows, self._state.deck_scroll_offset, self._panel_lines()):
-            table.add_row(icon, content)
+        max_rows = self._pipeline_panel_lines()
+        for icon, content, time_text in self._window_slice(rows, self._state.deck_scroll_offset, max_rows):
+            table.add_row(icon, content, time_text)
 
         title = self._panel_title("deck", "// DECK")
         return Panel(table, title=title, border_style=self._panel_border_style("deck"), padding=(0, 1))
 
     def _build_timing_panel(self) -> Panel:
-        return self._timing_table.render(
+        table = Table.grid(padding=(0, 1))
+        table.add_column(justify="right", no_wrap=True)
+        table.add_column(justify="left", no_wrap=False)
+
+        rows: list[tuple[Text, Text]] = []
+        if not self._state.tasks:
+            rows.append(
+                (
+                    Text("◦", style=_C_DIM_CYAN),
+                    Text("awaiting task graph...", style=_C_DIM_CYAN),
+                )
+            )
+        else:
+            for task in self._state.tasks:
+                symbol, color = self._TASK_STYLE.get(task.status, ("◦", _C_DIM_CYAN))
+                task_text = Text(task.description, style=color)
+                if task.agent and task.status == "running":
+                    task_text.append(f"  /{task.agent}/", style=_C_DIM_CYAN)
+                if task.error:
+                    task_text.append(f"  {task.error}", style=_C_NEON_CYAN)
+                rows.append((Text(symbol, style=color), task_text))
+
+        for icon, content in self._window_slice(rows, self._state.stage_scroll_offset, self._timing_panel_lines()):
+            table.add_row(icon, content)
+
+        return Panel(
+            table,
+            title=self._panel_title("stage", "// TASKLIST"),
             border_style=self._panel_border_style("stage"),
-            title=self._panel_title("stage", "// STAGE.TIMINGS"),
-            scroll_offset=self._state.stage_scroll_offset,
-            max_rows=self._panel_lines(),
+            padding=(0, 1),
         )
 
     def _build_stream_panel(self) -> Panel:
@@ -992,7 +962,7 @@ class RichLiveRenderer:
 
         logs = list(self._state.logs)
 
-        visible = self._window_slice(logs, self._state.data_scroll_offset, self._panel_lines())
+        visible = self._window_slice(logs, self._state.data_scroll_offset, self._stream_panel_lines())
 
         for log in visible:
             ts_str = log.ts[11:19] if len(log.ts) >= 19 else log.ts
@@ -1018,10 +988,17 @@ class RichLiveRenderer:
             title += f" [bold #ff2d6f]⏸ +{offset}[/bold #ff2d6f]"
         return Panel(table, title=title, border_style=self._panel_border_style("data"), padding=(0, 1))
 
-    def _panel_lines(self) -> int:
-        """Approximate content lines for half-height right-column panels."""
-        h = self._console.size.height
-        return max(5, (h - 14) // 2 - 2)
+    def _pipeline_panel_lines(self) -> int:
+        return max(3, self._default_body_metrics()["pipeline_size"] - 2)
+
+    def _timing_panel_lines(self) -> int:
+        return max(3, self._default_body_metrics()["timing_size"] - 2)
+
+    def _stream_panel_lines(self) -> int:
+        return max(3, self._default_body_metrics()["stream_size"] - 2)
+
+    def _agent_panel_lines(self) -> int:
+        return max(3, self._default_body_metrics()["agent_size"] - 2)
 
     def _build_agent_panel(self) -> Panel:
         title = "// AGENT.OUTPUT"
@@ -1032,7 +1009,7 @@ class RichLiveRenderer:
         if not lines:
             body: Text | str = Text("No agent running.", style=f"dim {_C_PRIMARY_TEXT}")
         else:
-            visible = self._window_slice(lines, self._state.agent_scroll_offset, self._panel_lines())
+            visible = self._window_slice(lines, self._state.agent_scroll_offset, self._agent_panel_lines())
             body = Text()
             for idx, line in enumerate(visible):
                 if idx:

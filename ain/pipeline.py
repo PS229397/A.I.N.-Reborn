@@ -3595,6 +3595,7 @@ def main() -> None:
     reset_parser = subparsers.add_parser("reset", help="Reset pipeline state")
     reset_parser.add_argument("--hard", action="store_true", help="Remove generated files and logs")
     reset_parser.add_argument("--yes", action="store_true", help="Confirm hard reset without prompting")
+    subparsers.add_parser("clean", help="Remove all generated files and reset to idle")
 
     logs_parser = subparsers.add_parser("logs", help="View merged logs")
     logs_parser.add_argument("--follow", action="store_true", help="Follow logs continuously")
@@ -3655,7 +3656,7 @@ def main() -> None:
         success("Pipeline reset to idle.")
         return
 
-    if args.clean:
+    if args.clean or args.command == "clean":
         banner("A.I.N. Pipeline - Clean")
         clean_workspace()
         return

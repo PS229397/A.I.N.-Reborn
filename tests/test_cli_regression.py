@@ -217,3 +217,19 @@ def test_version_subcommand_prints_version(monkeypatch, tmp_path):
         pipeline.main()
 
     assert stdout.getvalue().strip() == "0.1.8"
+
+
+def test_clean_subcommand_routes_to_workspace_cleanup(monkeypatch, tmp_path):
+    _configure_runtime_paths(monkeypatch, tmp_path)
+    seen = {}
+
+    monkeypatch.setattr(
+        pipeline,
+        "clean_workspace",
+        lambda silent=False: seen.setdefault("silent", silent),
+    )
+    monkeypatch.setattr(sys, "argv", ["ain", "clean"])
+
+    pipeline.main()
+
+    assert seen == {"silent": False}
