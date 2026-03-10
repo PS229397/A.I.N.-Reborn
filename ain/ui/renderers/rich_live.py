@@ -99,9 +99,9 @@ _KEYBAR_ENTRIES: list[tuple[str, str]] = [
     ("Q", "jack out"),
     ("R", "reboot"),
     ("M", "cycle mode"),
-    ("L", "data feed"),
-    ("C", "sys.config"),
-    ("S", "density"),
+    ("D", "data feed"),
+    ("A", "agent view"),
+    ("T", "tasks"),
     ("F", "freeze"),
 ]
 
@@ -114,9 +114,9 @@ _HELP_LINES: list[tuple[str, str]] = [
     ("R",     "reboot current run"),
     ("M",     "cycle pipeline mode"),
     ("← / →", "cycle panel focus"),
-    ("L",     "toggle data-feed view"),
-    ("C",     "toggle sys.config view"),
-    ("S",     "toggle compact deck density"),
+    ("D",     "toggle data-feed view"),
+    ("A",     "toggle agent view (when not approving)"),
+    ("T",     "toggle task list view"),
     ("?",     "toggle help.sys overlay"),
     ("F",     "freeze / unfreeze focused live pane"),
     ("↑ / ↓", "scroll focused pane"),
@@ -159,7 +159,7 @@ class _RendererState:
     agent_name: str = ""
     awaiting_approval: bool = False
     # Keyboard-driven UI state
-    view_mode: str = "normal"   # normal | logs | config | help
+    view_mode: str = "normal"   # normal | logs | help | agent | tasks
     focused_panel: str = "none"  # none | deck | data | stage | agent
     deck_scroll_offset: int = 0
     data_scroll_offset: int = 0
@@ -501,17 +501,21 @@ class RichLiveRenderer:
                 step = -1 if key == "left" else 1
                 state.focused_panel = self._FOCUS_ORDER[(current_idx + step) % len(self._FOCUS_ORDER)]
 
-        elif key_norm == "l":
+        elif key_norm == "d":
             state.view_mode = "normal" if state.view_mode == "logs" else "logs"
-
-        elif key_norm == "c":
-            state.view_mode = "normal" if state.view_mode == "config" else "config"
-
-        elif key_norm == "s":
-            state.compact = not state.compact
 
         elif key == "?":
             state.view_mode = "normal" if state.view_mode == "help" else "help"
+
+        elif key_norm == "a":
+            if state.awaiting_approval:
+                if self._on_approve is not None:
+                    self._on_approve()
+            else:
+                state.view_mode = "normal" if state.view_mode == "agent" else "agent"
+
+        elif key_norm == "t":
+            state.view_mode = "normal" if state.view_mode == "tasks" else "tasks"
 
         elif key_norm == "f":
             if state.focused_panel == "data":
@@ -775,19 +779,26 @@ class RichLiveRenderer:
             layout.split_column(*cols)
             return layout
 
-        if state.view_mode == "config":
-            config_layout = Layout(name="config", ratio=1)
-            config_layout.split_column(
-                Layout(self._build_config_panel(), name="config.info", ratio=1),
-                Layout(self._build_timing_panel(), name="config.timings", ratio=1),
-            )
+        if state.view_mode == "agent":
             cols = [
                 Layout(self._build_status_bar(), name="status", size=3),
-                config_layout,
+                Layout(self._build_agent_panel(), name="agent", ratio=1),
             ]
             if has_input:
                 cols.append(Layout(self._build_input_panel(), name="input", size=5))
             cols.append(Layout(keybar, name="keybar", size=4))
+            layout = Layout()
+            layout.split_column(*cols)
+            return layout
+
+        if state.view_mode == "tasks":
+            cols = [
+                Layout(self._build_status_bar(), name="status", size=3),
+                Layout(self._build_timing_panel(), name="tasks", ratio=1),
+            ]
+            if has_input:
+                cols.append(Layout(self._build_input_panel(), name="input", size=5))
+            cols.append(Layout(keybar, name="keybar", size=3))
             layout = Layout()
             layout.split_column(*cols)
             return layout
@@ -1055,19 +1066,6 @@ class RichLiveRenderer:
             body,
             title=self._panel_title("agent", title),
             border_style=self._panel_border_style("agent"),
-            padding=(0, 1),
-        )
-
-    def _build_config_panel(self) -> Panel:
-        text = Text()
-        text.append("// SYS.CONFIG\n\n", style=_C_NEON_PINK)
-        text.append("Press ", style=_C_DIM_CYAN)
-        text.append(" C ", style="bold #2EDCD1")
-        text.append(" to return to main deck.", style=_C_DIM_CYAN)
-        return Panel(
-            text,
-            title="[bold #ff2d6f]// SYS.CONFIG[/bold #ff2d6f]",
-            border_style=_C_BORDER,
             padding=(0, 1),
         )
 

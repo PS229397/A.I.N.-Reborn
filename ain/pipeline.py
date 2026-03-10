@@ -673,8 +673,7 @@ def resolve_continue_stage(state: dict[str, Any]) -> str | None:
         return state.get("last_attempted_stage") or _next_stage_after(state.get("last_safe_stage", "idle"))
     if current == FAILED:
         if state.get("pause_reason") not in {"token_exhaustion", "no_response"}:
-            # Fall back to last safe/attempted stage to allow manual resume.
-            return state.get("last_attempted_stage") or _next_stage_after(state.get("last_safe_stage", "idle"))
+            raise ValueError("Current failed state is not recoverable via continue")
         return state.get("last_attempted_stage") or _next_stage_after(state.get("last_safe_stage", "idle"))
     if current in STAGES and current != "idle":
         return current
@@ -3729,10 +3728,21 @@ AGENT_CURL_INSTALLS: dict[str, str] = {
 }
 
 
-def _install_via_npm(command: str, pkg: str) -> bool:
+def _install_via_npm(command: str, pkg: str, npm_cmd: str | None = None) -> bool:
     """Install an npm package globally. Returns True on success."""
+    npm_exec = npm_cmd or shutil.which("npm")
+    if not npm_exec:
+        warn(f"{command}  npm not found, cannot install {pkg}")
+        warn(f"  Manual install: npm install -g {pkg}")
+        return False
+
     info(f"{command}  not found, installing {pkg} ...")
-    result = run_command(["npm", "install", "-g", pkg], capture=True, timeout=120)
+    try:
+        result = run_command([npm_exec, "install", "-g", pkg], capture=True, timeout=120)
+    except FileNotFoundError:
+        warn(f"{command}  npm not found on PATH, cannot install {pkg}")
+        warn(f"  Manual install: npm install -g {pkg}")
+        return False
     if result.returncode == 0:
         success(f"{command}  installed")
         return True
@@ -3790,8 +3800,8 @@ def install_agents(config: dict) -> None:
     print()
     info("Checking agent CLIs ...")
 
-    has_npm = bool(shutil.which("npm"))
-    if not has_npm:
+    npm_cmd = shutil.which("npm")
+    if not npm_cmd:
         warn("npm not found  npm-based agents cannot be auto-installed.")
         warn("Install Node.js from https://nodejs.org then re-run ain init")
 
@@ -3812,8 +3822,8 @@ def install_agents(config: dict) -> None:
             _install_via_curl(command, AGENT_CURL_INSTALLS[command])
         elif command in AGENT_NPM_PACKAGES:
             any_missing = True
-            if has_npm:
-                _install_via_npm(command, AGENT_NPM_PACKAGES[command])
+            if npm_cmd:
+                _install_via_npm(command, AGENT_NPM_PACKAGES[command], npm_cmd=npm_cmd)
             else:
                 warn(f"{command}  skipped (npm not available)")
         else:
@@ -3850,21 +3860,15 @@ def run_init() -> None:
     else:
         info(f"Skipped {CONFIG_FILE.relative_to(REPO_ROOT)} (already exists)")
 
-    prompt_names = [
-        "architecture_prompt.md",
-        "planning_questions_prompt.md",
-        "planning_generation_prompt.md",
-        "task_creation_prompt.md",
-        "implementation_prompt.md",
-    ]
-    for name in prompt_names:
-        target = PROMPTS_DIR / name
+    for src in (res_files("ain") / "data" / "prompts").iterdir():
+        if not src.name.endswith(".md"):
+            continue
+        target = PROMPTS_DIR / src.name
         if not target.exists():
-            content = res_files("ain").joinpath(f"data/prompts/{name}").read_text(encoding="utf-8")
-            target.write_text(content, encoding="utf-8")
-            success(f"Created {target.relative_to(REPO_ROOT)}")
+            target.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+            success(f"Created {_display_path(target)}")
         else:
-            info(f"Skipped {target.relative_to(REPO_ROOT)} (already exists)")
+            info(f"Skipped {_display_path(target)} (already exists)")
 
     install_agents(load_config())
 
@@ -4416,12 +4420,14 @@ def _run_with_tui(
                         "SUCCESS: pipeline completed. [N] new AIN session, [Q] quit"
                     ).strip().lower()
                     if choice == "n":
+                        clean_workspace(silent=True)
                         save_state(_default_state(load_config()))
                         if PLANNING_APPROVED_FLAG.exists():
                             PLANNING_APPROVED_FLAG.unlink()
                         next_start_stage = None
                         next_single_stage = False
                         continue
+                    clean_workspace(silent=True)
                     break
             except SystemExit as exc:
                 exit_code = exc.code if isinstance(exc.code, int) else 1
