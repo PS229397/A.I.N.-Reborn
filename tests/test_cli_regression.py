@@ -233,3 +233,19 @@ def test_clean_subcommand_routes_to_workspace_cleanup(monkeypatch, tmp_path):
     pipeline.main()
 
     assert seen == {"silent": False}
+
+
+def test_clean_workspace_clears_docs_contents(monkeypatch, tmp_path):
+    _configure_runtime_paths(monkeypatch, tmp_path)
+    pipeline.DOCS_DIR.mkdir(parents=True, exist_ok=True)
+    (pipeline.DOCS_DIR / "TASKS.md").write_text("# Tasks\n", encoding="utf-8")
+    (pipeline.DOCS_DIR / "nested").mkdir()
+    (pipeline.DOCS_DIR / "nested" / "artifact.txt").write_text("artifact", encoding="utf-8")
+
+    monkeypatch.setattr(pipeline, "load_config", lambda: {})
+    monkeypatch.setattr(pipeline, "save_state", lambda _state: None)
+
+    pipeline.clean_workspace(silent=True)
+
+    assert pipeline.DOCS_DIR.exists()
+    assert list(pipeline.DOCS_DIR.iterdir()) == []

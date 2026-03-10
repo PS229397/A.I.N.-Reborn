@@ -2746,13 +2746,29 @@ def _clean_dirs() -> list[Path]:
     ]
 
 
+def _clean_docs_dir() -> list[str]:
+    removed: list[str] = []
+    if not DOCS_DIR.exists():
+        return removed
+
+    for entry in DOCS_DIR.iterdir():
+        if entry.is_dir():
+            shutil.rmtree(entry)
+            removed.append(str(entry.relative_to(REPO_ROOT)) + "/")
+        else:
+            entry.unlink()
+            removed.append(str(entry.relative_to(REPO_ROOT)))
+
+    return removed
+
+
 def clean_workspace(silent: bool = False) -> None:
     """Delete all per-run generated files and reset pipeline state to idle.
 
     Preserves: config.json, prompts/, CLAUDE.md, and all source code.
     Called automatically after a successful auto-commit, or manually via --clean.
     """
-    removed: list[str] = []
+    removed: list[str] = _clean_docs_dir()
 
     for f in _clean_files():
         if f.exists():
