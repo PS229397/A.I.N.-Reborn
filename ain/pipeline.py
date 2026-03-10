@@ -3053,7 +3053,9 @@ def detect_validation_commands(tracked_files: list[str]) -> list[list[str]]:
 
     if "pyproject.toml" in files_set or "requirements.txt" in files_set:
         if any(Path(REPO_ROOT / f).exists() for f in ["pytest.ini", "pyproject.toml", "setup.cfg"]):
-            cmds.append(["python", "-m", "pytest", "--tb=short", "-q"])
+            pytest_cmd = _resolve_pytest_command()
+            if pytest_cmd is not None:
+                cmds.append(pytest_cmd)
 
     if "go.mod" in files_set:
         cmds.append(["go", "test", "./..."])
@@ -3063,6 +3065,45 @@ def detect_validation_commands(tracked_files: list[str]) -> list[list[str]]:
         cmds.append(["cargo", "test"])
 
     return cmds
+
+
+def _resolve_pytest_command() -> list[str] | None:
+    candidates: list[list[str]] = []
+    local_venv = REPO_ROOT / ".venv" / "Scripts" / "python.exe"
+    if local_venv.exists():
+        candidates.append([str(local_venv)])
+
+    if sys.executable:
+        candidates.append([sys.executable])
+
+    py_launcher = shutil.which("py")
+    if py_launcher:
+        candidates.append([py_launcher, "-3"])
+
+    seen: set[tuple[str, ...]] = set()
+    for base_cmd in candidates:
+        key = tuple(base_cmd)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            probe = run_command(base_cmd + ["-m", "pytest", "--version"], capture=True, timeout=10)
+        except Exception:
+            continue
+        if probe.returncode == 0:
+            return base_cmd + ["-m", "pytest", "--tb=short", "-q"]
+
+    return None
+
+
+def _summarize_validation_failure(result: subprocess.CompletedProcess, cmd_str: str) -> str:
+    stderr_lines = [line.strip() for line in (result.stderr or "").splitlines() if line.strip()]
+    stdout_lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    detail = stderr_lines[0] if stderr_lines else (stdout_lines[-1] if stdout_lines else f"exit {result.returncode}")
+    detail = _strip_ansi(detail)
+    if len(detail) > 120:
+        detail = detail[:117] + "..."
+    return f"{Path(cmd_str.split()[0]).name}: {detail}"
 
 
 def run_validation(state: dict, config: dict) -> None:
@@ -3108,6 +3149,13 @@ def run_validation(state: dict, config: dict) -> None:
         if not passed:
             all_passed = False
             error(f"Validation failed: {cmd_str}")
+            _emit(
+                AgentOutput(
+                    ts=_now_iso(),
+                    agent="validation",
+                    line=f"WARNING X failed ({_summarize_validation_failure(result, cmd_str)})",
+                )
+            )
 
     val_log = LOGS_DIR / "validation.log"
     val_log.write_text("\n".join(log_lines), encoding="utf-8")
@@ -3779,6 +3827,8 @@ def _run_with_tui(
         run_pipeline(start_stage=start_stage, single_stage=single_stage, mode="plain")
         return
 
+    exit_code: int | None = None
+    persistent_error: str | None = None
     try:
         from ain.tui import RichRenderer
         from ain.runtime.emitter import Emitter
@@ -3795,34 +3845,49 @@ def _run_with_tui(
         renderer.subscribe(emitter)
         renderer.start()
         try:
-            next_start_stage = start_stage
-            next_single_stage = single_stage
-            while True:
-                run_pipeline(
-                    start_stage=next_start_stage,
-                    single_stage=next_single_stage,
-                    emitter=emitter,
-                    renderer=renderer,
-                    mode="rich",
-                )
+            try:
+                next_start_stage = start_stage
+                next_single_stage = single_stage
+                while True:
+                    run_pipeline(
+                        start_stage=next_start_stage,
+                        single_stage=next_single_stage,
+                        emitter=emitter,
+                        renderer=renderer,
+                        mode="rich",
+                    )
 
-                state = load_state(load_config())
-                if state.get("current_stage") != "done":
+                    state = load_state(load_config())
+                    if state.get("current_stage") != "done":
+                        break
+
+                    choice = renderer.request_input(
+                        "SUCCESS: pipeline completed. [N] new AIN session, [Q] quit"
+                    ).strip().lower()
+                    if choice == "n":
+                        save_state(_default_state(load_config()))
+                        if PLANNING_APPROVED_FLAG.exists():
+                            PLANNING_APPROVED_FLAG.unlink()
+                        next_start_stage = None
+                        next_single_stage = False
+                        continue
                     break
-
-                choice = renderer.request_input(
-                    "SUCCESS: pipeline completed. [N] new AIN session, [Q] quit"
-                ).strip().lower()
-                if choice == "n":
-                    save_state(_default_state(load_config()))
-                    if PLANNING_APPROVED_FLAG.exists():
-                        PLANNING_APPROVED_FLAG.unlink()
-                    next_start_stage = None
-                    next_single_stage = False
-                    continue
-                break
+            except SystemExit as exc:
+                exit_code = exc.code if isinstance(exc.code, int) else 1
+                if exit_code not in (0, None):
+                    try:
+                        failed_state = load_state(load_config())
+                        last_error = failed_state.get("last_error") or {}
+                        persistent_error = str(last_error.get("message") or "Pipeline failed.")
+                    except Exception:
+                        persistent_error = "Pipeline failed."
         finally:
             renderer.stop()
+
+        if persistent_error:
+            print(f"{C.RED}  X{C.RESET} {persistent_error}", file=sys.stderr)
+        if exit_code is not None:
+            raise SystemExit(exit_code)
 
     except Exception:
         # Any TUI failure  fall back to plain output

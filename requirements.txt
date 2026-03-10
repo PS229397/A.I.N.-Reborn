@@ -1,5 +1,6 @@
 # Runtime dependency (bundled in pyproject.toml)
 colorama>=0.4.6
+pytest>=8.0
 
 # Build / publish tools (not required to run the pipeline)
 # pip install build twine
