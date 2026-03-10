@@ -97,6 +97,8 @@ BRAINSTORM_CONTEXT_FILE = PIPELINE_DIR / "brainstorm_context.md"
 TASK_REVIEW_FEEDBACK_FILE = PIPELINE_DIR / "task_review_feedback.md"
 DOCS_DIR      = REPO_ROOT / "docs"
 PIPELINE_LOG  = LOGS_DIR / "pipeline.log"
+NOTIFICATIONS_LOG = LOGS_DIR / "notifications.log"
+NOTIFICATIONS_TAB_TITLE = "A.I.N. Notifications"
 
 REPO_TREE_FILE     = SCAN_DIR / "repo_tree.txt"
 TRACKED_FILES_FILE = SCAN_DIR / "tracked_files.txt"
@@ -387,6 +389,20 @@ def _display_path(path: Path) -> str:
         return str(path)
 
 
+def _is_unexpected_kwarg_typeerror(exc: TypeError) -> bool:
+    return "unexpected keyword argument" in str(exc)
+
+
+def _run_pipeline_compat(**kwargs: Any) -> None:
+    try:
+        run_pipeline(**kwargs)
+    except TypeError as exc:
+        if not _is_unexpected_kwarg_typeerror(exc):
+            raise
+        reduced = {k: v for k, v in kwargs.items() if k in {"start_stage", "single_stage"}}
+        run_pipeline(**reduced)
+
+
 def _workspace_status_snapshot() -> dict[str, str]:
     """Return a repo-relative git porcelain snapshot keyed by path."""
     git = shutil.which("git")
@@ -585,6 +601,184 @@ def save_state(state: dict[str, Any]) -> None:
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
     _log(f"State saved: {state['current_stage']}")
+
+
+def checkpoint_before_stage(stage: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
+    if state is None:
+        state = load_state()
+    state = load_state_with_backfill(state)
+    state["last_attempted_stage"] = stage
+    save_state(state)
+    return state
+
+
+def checkpoint_after_stage_success(
+    stage: str,
+    next_stage: str,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if state is None:
+        state = load_state()
+    state = load_state_with_backfill(state)
+    completed = state.get("completed_stages", [])
+    if stage not in completed:
+        completed.append(stage)
+    state["completed_stages"] = completed
+    state["last_safe_stage"] = stage
+    state["last_attempted_stage"] = stage
+    state["current_stage"] = next_stage
+    state["status"] = next_stage
+    save_state(state)
+    return state
+
+
+def classify_agent_failure(message: str) -> str:
+    text = (message or "").lower()
+    if any(phrase in text for phrase in _TOKEN_LIMIT_PHRASES):
+        return "token_exhaustion"
+    if "timed out" in text or "no response" in text:
+        return "no_response"
+    return "unknown"
+
+
+def pause_pipeline(reason: str, details: str, resume_hint: str) -> dict[str, Any]:
+    state = load_state()
+    state = load_state_with_backfill(state)
+    state["current_stage"] = "paused"
+    state["status"] = "paused"
+    state["pause_reason"] = reason
+    state["pause_details"] = details
+    state["resume_hint"] = resume_hint
+    save_state(state)
+    return state
+
+
+def _next_stage_after(stage: str) -> str:
+    try:
+        idx = STAGES.index(stage)
+    except ValueError:
+        return "scanning"
+    for candidate in STAGES[idx + 1 :]:
+        if candidate not in {"idle", "done"}:
+            return candidate
+    return "done"
+
+
+def resolve_continue_stage(state: dict[str, Any]) -> str | None:
+    current = state.get("current_stage", "idle")
+    if current == "done":
+        return None
+    if current == "paused":
+        return state.get("last_attempted_stage") or _next_stage_after(state.get("last_safe_stage", "idle"))
+    if current == FAILED:
+        if state.get("pause_reason") not in {"token_exhaustion", "no_response"}:
+            raise ValueError("Current failed state is not recoverable via continue")
+        return state.get("last_attempted_stage") or _next_stage_after(state.get("last_safe_stage", "idle"))
+    if current in STAGES and current != "idle":
+        return current
+    return "scanning"
+
+
+def is_warp_running() -> bool:
+    try:
+        result = run_command(["tasklist"], capture=True, timeout=15)
+    except Exception:
+        return False
+    return "warp.exe" in (result.stdout or "").lower()
+
+
+def open_warp_tab(title: str, command: str) -> dict[str, Any]:
+    warp = shutil.which("warp")
+    if not warp:
+        return {"success": False, "mode": "warp", "details": "Warp CLI not found on PATH."}
+    try:
+        if not is_warp_running():
+            subprocess.Popen([warp])
+            details = "Opened new Warp launch."
+        else:
+            details = "Opened tab in existing Warp window."
+        subprocess.Popen([warp, "new-tab", "--title", title, "--command", command])
+        return {"success": True, "mode": "warp", "details": details}
+    except Exception as exc:
+        return {"success": False, "mode": "warp", "details": str(exc)}
+
+
+def open_fallback_terminal(title: str, command: str) -> dict[str, Any]:
+    try:
+        subprocess.Popen(["cmd.exe", "/c", "start", title, "cmd.exe", "/k", command])
+        return {
+            "success": True,
+            "mode": "fallback_terminal",
+            "details": f"Opened fallback terminal window with title '{title}'.",
+        }
+    except Exception as exc:
+        return {"success": False, "mode": "fallback_terminal", "details": str(exc)}
+
+
+def open_preferred_terminal_tab(title: str, command: str) -> dict[str, Any]:
+    warp_result = open_warp_tab(title, command)
+    if warp_result.get("success"):
+        return warp_result
+    fallback = open_fallback_terminal(title, command)
+    details = f"Warp tab launch failed: {warp_result.get('details')}"
+    if fallback.get("details"):
+        details = f"{details} {fallback['details']}"
+    return {
+        "success": fallback.get("success", False),
+        "mode": fallback.get("mode", "fallback_terminal"),
+        "details": details,
+    }
+
+
+def notify(level: str, summary: str, hint: str | None = None) -> dict[str, Any]:
+    normalized = level.lower()
+    state = load_state()
+    state = load_state_with_backfill(state)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    NOTIFICATIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(NOTIFICATIONS_LOG, "a", encoding="utf-8") as handle:
+        handle.write(f"{normalized.upper()}: {summary}\n")
+        if hint:
+            handle.write(f"HINT: {hint}\n")
+
+    channel = state.get("notification_channel") or {}
+    if channel.get("active") and channel.get("log_path") == str(NOTIFICATIONS_LOG):
+        launch = {
+            "success": True,
+            "mode": channel.get("mode", "fallback_terminal"),
+            "details": "Reusing existing notification channel.",
+        }
+    else:
+        command = f"type \"{NOTIFICATIONS_LOG}\""
+        launched = open_preferred_terminal_tab(NOTIFICATIONS_TAB_TITLE, command)
+        launch = dict(launched)
+        prefix = "Recreated notification channel." if channel else "Created notification channel."
+        launch["details"] = f"{prefix} {launched.get('details', '')}".strip()
+        channel = {
+            "active": bool(launched.get("success")),
+            "title": NOTIFICATIONS_TAB_TITLE,
+            "mode": launched.get("mode"),
+            "details": launched.get("details"),
+            "log_path": str(NOTIFICATIONS_LOG),
+            "created_at": _now_iso(),
+        }
+
+    channel["active"] = True
+    channel["title"] = NOTIFICATIONS_TAB_TITLE
+    channel["log_path"] = str(NOTIFICATIONS_LOG)
+    channel["last_level"] = normalized
+    channel["last_notified_at"] = _now_iso()
+    state["notification_channel"] = channel
+    save_state(state)
+
+    return {
+        "success": True,
+        "level": normalized,
+        "summary": summary,
+        "hint": hint,
+        "channel_launch": launch,
+    }
 
 
 def set_stage(stage: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -931,7 +1125,7 @@ def prompt_for_pipeline_mode(state: dict[str, Any], config: dict[str, Any]) -> s
         print(f"  Press Enter to keep {current}.")
         try:
             choice = input("  Mode: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
+        except (EOFError, KeyboardInterrupt, OSError):
             return current
         if not choice:
             return current
@@ -2754,10 +2948,10 @@ def _clean_docs_dir() -> list[str]:
     for entry in DOCS_DIR.iterdir():
         if entry.is_dir():
             shutil.rmtree(entry)
-            removed.append(str(entry.relative_to(REPO_ROOT)) + "/")
+            removed.append(_display_path(entry) + "/")
         else:
             entry.unlink()
-            removed.append(str(entry.relative_to(REPO_ROOT)))
+            removed.append(_display_path(entry))
 
     return removed
 
@@ -2773,12 +2967,12 @@ def clean_workspace(silent: bool = False) -> None:
     for f in _clean_files():
         if f.exists():
             f.unlink()
-            removed.append(str(f.relative_to(REPO_ROOT)))
+            removed.append(_display_path(f))
 
     for d in _clean_dirs():
         if d.exists():
             shutil.rmtree(d)
-            removed.append(str(d.relative_to(REPO_ROOT)) + "/")
+            removed.append(_display_path(d) + "/")
 
     # Reset state to idle (keeps config intact)
     save_state(_default_state(load_config()))
@@ -3151,7 +3345,7 @@ def run_implementation(state: dict, config: dict) -> None:
             dep_statuses[task["id"]] = "completed" if succeeded else "failed"
 
     IMPLEMENTATION_LOG_FILE.write_text("\n".join(log_lines), encoding="utf-8")
-    success(f"Log  {IMPLEMENTATION_LOG_FILE.relative_to(REPO_ROOT)}")
+    success(f"Log  {_display_path(IMPLEMENTATION_LOG_FILE)}")
     set_stage("validation", state)
 
 
@@ -3298,7 +3492,7 @@ def run_validation(state: dict, config: dict) -> None:
 
     val_log = LOGS_DIR / "validation.log"
     val_log.write_text("\n".join(log_lines), encoding="utf-8")
-    success(f"Log  {val_log.relative_to(REPO_ROOT)}")
+    success(f"Log  {_display_path(val_log)}")
 
     if not all_passed:
         raise RuntimeError("Validation failed. See .ai-pipeline/logs/validation.log")
@@ -3695,6 +3889,7 @@ def run_pipeline(
             duration_ms = int((time.perf_counter() - t0) * 1000)
             err_msg = str(e)
             err_code = getattr(e, "code", None)
+            failure_reason = classify_agent_failure(err_msg)
             _record_stage_timing(stage, started_at, ended_at, duration_ms, "failed")
             _emit(
                 StageFailed(
@@ -3722,8 +3917,20 @@ def run_pipeline(
                 "message": err_msg,
                 "details": {"stage": stage},
                 "stage": stage,
-                "recoverable": True,
+                "recoverable": failure_reason in {"token_exhaustion", "no_response"},
             }
+            state["last_attempted_stage"] = stage
+            if failure_reason in {"token_exhaustion", "no_response"}:
+                completed = state.get("completed_stages", [])
+                eligible = [s for s in completed if s in STAGES and STAGES.index(s) < STAGES.index(stage)]
+                state["last_safe_stage"] = eligible[-1] if eligible else "idle"
+                save_state(state)
+                pause_pipeline(failure_reason, err_msg, f"Run: ain run --resume {stage}")
+                try:
+                    notify("warning", f"Pipeline paused during {stage_label}", f"Run: ain run --resume {stage}")
+                except Exception:
+                    pass
+                return
             state["status"] = FAILED
             state["current_stage"] = stage
             save_state(state)
@@ -3861,14 +4068,16 @@ def main() -> None:
         return
 
     if args.status or args.command == "status":
-        state = load_state()
         if getattr(args, "json", False):
+            service_state = state_service.load_state(state_path=STATE_FILE)
+            state = load_state_with_backfill(service_state.to_dict(), load_config())
             payload = {
                 "pipeline_state": state,
                 "health": config_service.get_health_summary(REPO_ROOT).__dict__,
             }
             _print_json(payload)
         else:
+            state = load_state()
             show_status(state)
         return
 
@@ -3918,7 +4127,10 @@ def main() -> None:
     if args.command == "run":
         config = load_config()
         state = load_state(config)
-        selected_mode = prompt_for_pipeline_mode(state, config)
+        if sys.stdin is not None and sys.stdin.isatty():
+            selected_mode = prompt_for_pipeline_mode(state, config)
+        else:
+            selected_mode = get_selected_mode(state, config)
         if selected_mode != get_selected_mode(state, config):
             set_pipeline_mode(selected_mode, state, config)
         single = bool(getattr(args, "stage", None))
@@ -3937,17 +4149,11 @@ def main() -> None:
 
     if args.command == "continue":
         state = load_state()
-        current = state.get("current_stage", "idle")
-        if current == "done":
+        stage = resolve_continue_stage(state)
+        if stage is None:
             success("Pipeline is already complete.")
             show_status(state)
             return
-        if current in ("paused", "failed"):
-            stage = state.get("last_attempted_stage") or state.get("last_safe_stage", "scanning")
-        elif current in STAGES and current not in ("idle",):
-            stage = current
-        else:
-            stage = "scanning"
         info(f"Continuing from: {STAGE_LABELS.get(stage, stage)}")
         _run_with_tui(start_stage=stage)
         return
@@ -3963,7 +4169,7 @@ def _run_with_tui(
 ) -> None:
     """Launch run_pipeline, wrapping in the Rich TUI unless --plain is set."""
     if plain:
-        run_pipeline(start_stage=start_stage, single_stage=single_stage, mode="plain")
+        _run_pipeline_compat(start_stage=start_stage, single_stage=single_stage, mode="plain")
         return
 
     exit_code: int | None = None
@@ -3976,7 +4182,7 @@ def _run_with_tui(
 
         # Use Rich's own terminal detection  more reliable than sys.stdout.isatty()
         if not _Console().is_terminal:
-            run_pipeline(start_stage=start_stage, single_stage=single_stage, mode="plain")
+            _run_pipeline_compat(start_stage=start_stage, single_stage=single_stage, mode="plain")
             return
 
         emitter  = Emitter()
@@ -3988,7 +4194,7 @@ def _run_with_tui(
                 next_start_stage = start_stage
                 next_single_stage = single_stage
                 while True:
-                    run_pipeline(
+                    _run_pipeline_compat(
                         start_stage=next_start_stage,
                         single_stage=next_single_stage,
                         emitter=emitter,
@@ -4030,7 +4236,7 @@ def _run_with_tui(
 
     except Exception:
         # Any TUI failure  fall back to plain output
-        run_pipeline(start_stage=start_stage, single_stage=single_stage, mode="plain")
+        _run_pipeline_compat(start_stage=start_stage, single_stage=single_stage, mode="plain")
 
 
 if __name__ == "__main__":

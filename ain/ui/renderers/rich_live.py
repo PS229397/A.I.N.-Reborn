@@ -113,7 +113,7 @@ _HELP_LINES: list[tuple[str, str]] = [
     ("Q",     "jack out  (confirm if run active)"),
     ("R",     "reboot current run"),
     ("M",     "cycle pipeline mode"),
-    ("← / →", "cycle pane focus"),
+    ("← / →", "cycle panel focus"),
     ("L",     "toggle data-feed view"),
     ("C",     "toggle sys.config view"),
     ("S",     "toggle compact deck density"),
@@ -1115,7 +1115,7 @@ class RichLiveRenderer:
         bar.append(" help.sys", style=_C_DIM_CYAN)
         bar.append("  ", style="")
         bar.append(" ←/→ ", style="bold #ff2d6f")
-        bar.append(" focus pane", style=_C_DIM_CYAN)
+        bar.append(" focus panel", style=_C_DIM_CYAN)
         bar.append("  ", style="")
         bar.append(" ↑/↓ ", style="bold #ff2d6f")
         bar.append(" scroll", style=_C_DIM_CYAN)
