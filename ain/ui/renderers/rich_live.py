@@ -754,15 +754,20 @@ class RichLiveRenderer:
         state = self._state
         has_input = state.input_prompt is not None
         keybar = self._build_keybar()
+        keybar_size = 4
+
+        def _fullscreen_body_height() -> int:
+            base = self._console.size.height - 3 - keybar_size - (5 if has_input else 0)
+            return max(5, base - 2)  # trim two lines from the body to keep keybar fully visible
 
         if state.view_mode == "help":
             cols = [
                 Layout(self._build_status_bar(), name="status", size=3),
-                Layout(self._build_help_panel(), name="help", ratio=1),
+                Layout(self._build_help_panel(), name="help", size=_fullscreen_body_height()),
             ]
             if has_input:
                 cols.append(Layout(self._build_input_panel(), name="input", size=5))
-            cols.append(Layout(keybar, name="keybar", size=4))
+            cols.append(Layout(keybar, name="keybar", size=keybar_size))
             layout = Layout()
             layout.split_column(*cols)
             return layout
@@ -770,11 +775,11 @@ class RichLiveRenderer:
         if state.view_mode == "logs":
             cols = [
                 Layout(self._build_status_bar(), name="status", size=3),
-                Layout(self._build_stream_panel(), name="stream", ratio=1),
+                Layout(self._build_stream_panel(), name="stream", size=_fullscreen_body_height()),
             ]
             if has_input:
                 cols.append(Layout(self._build_input_panel(), name="input", size=5))
-            cols.append(Layout(keybar, name="keybar", size=4))
+            cols.append(Layout(keybar, name="keybar", size=keybar_size))
             layout = Layout()
             layout.split_column(*cols)
             return layout
@@ -782,11 +787,11 @@ class RichLiveRenderer:
         if state.view_mode == "agent":
             cols = [
                 Layout(self._build_status_bar(), name="status", size=3),
-                Layout(self._build_agent_panel(), name="agent", ratio=1),
+                Layout(self._build_agent_panel(), name="agent", size=_fullscreen_body_height()),
             ]
             if has_input:
                 cols.append(Layout(self._build_input_panel(), name="input", size=5))
-            cols.append(Layout(keybar, name="keybar", size=4))
+            cols.append(Layout(keybar, name="keybar", size=keybar_size))
             layout = Layout()
             layout.split_column(*cols)
             return layout
@@ -794,11 +799,14 @@ class RichLiveRenderer:
         if state.view_mode == "tasks":
             cols = [
                 Layout(self._build_status_bar(), name="status", size=3),
-                Layout(self._build_timing_panel(), name="tasks", ratio=1),
+                Layout(self._build_timing_panel(), name="tasks", size=_fullscreen_body_height()),
             ]
             if has_input:
                 cols.append(Layout(self._build_input_panel(), name="input", size=5))
-            cols.append(Layout(keybar, name="keybar", size=3))
+            cols.append(Layout(keybar, name="keybar", size=keybar_size))
+            layout = Layout()
+            layout.split_column(*cols)
+            return layout
             layout = Layout()
             layout.split_column(*cols)
             return layout
