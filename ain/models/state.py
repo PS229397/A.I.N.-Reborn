@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 from typing import Any, Literal
 
 
@@ -35,6 +36,23 @@ class PlannedFileChange:
     ensure_parent_dir: bool = True
 
 
+class MultilineInputMode(str, Enum):
+    FEATURE_DESCRIPTION = "feature_description"
+    TASK_DENIAL_FEEDBACK = "task_denial_feedback"
+
+
+@dataclass
+class MultilineInputState:
+    id: str
+    title: str
+    prompt: str
+    initial_text: str | None = None
+    value: str = ""
+    mode: MultilineInputMode = MultilineInputMode.FEATURE_DESCRIPTION
+    is_active: bool = False
+    source_stage: str = ""
+
+
 @dataclass
 class PipelineState:
     version: int
@@ -45,6 +63,9 @@ class PipelineState:
     created_at: str
     updated_at: str
     planned_file_changes: list[PlannedFileChange] = field(default_factory=list)
+    multiline_input: MultilineInputState | None = None
+    feature_description: str = ""
+    task_denial_feedback_by_task_id: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
