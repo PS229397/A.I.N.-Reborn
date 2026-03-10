@@ -673,7 +673,8 @@ def resolve_continue_stage(state: dict[str, Any]) -> str | None:
         return state.get("last_attempted_stage") or _next_stage_after(state.get("last_safe_stage", "idle"))
     if current == FAILED:
         if state.get("pause_reason") not in {"token_exhaustion", "no_response"}:
-            raise ValueError("Current failed state is not recoverable via continue")
+            # Fall back to last safe/attempted stage to allow manual resume.
+            return state.get("last_attempted_stage") or _next_stage_after(state.get("last_safe_stage", "idle"))
         return state.get("last_attempted_stage") or _next_stage_after(state.get("last_safe_stage", "idle"))
     if current in STAGES and current != "idle":
         return current
