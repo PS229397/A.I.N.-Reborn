@@ -29,6 +29,7 @@ node_modules/
 # AI pipeline — runtime state (generated per run, not part of the tool)
 .ai-pipeline/config.json
 .ai-pipeline/state.json
+.ai-pipeline/state.json.bak*
 .ai-pipeline/logs/
 .ai-pipeline/scan/
 .ai-pipeline/user_context.md
