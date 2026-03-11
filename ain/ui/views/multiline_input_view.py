@@ -150,10 +150,11 @@ class MultilineInputView:
 
         header = self._render_header()
         prompt = Text(self.prompt, style=_C_SECONDARY_TEXT)
+        spacer = Text("")
         body_panel = self._render_body()
         footer = self._render_footer()
 
-        content = Group(header, prompt, body_panel, footer)
+        content = Group(header, prompt, spacer, body_panel, footer)
         return Panel(
             content,
             title=self._panel_title(),
