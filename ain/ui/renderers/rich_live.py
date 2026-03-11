@@ -31,13 +31,16 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from ain.runtime.emitter import Emitter
 from ain.runtime.events import (
     AnyEvent,
     AgentOutput,
     ApprovalReceived,
     AwaitingApproval,
+    CancelMultilineInputEvent,
     LogLevel,
     LogLine,
+    OpenMultilineInputEvent,
     RunCompleted,
     RunStarted,
     RunStatus,
@@ -48,7 +51,9 @@ from ain.runtime.events import (
     TaskCompleted,
     TaskFailed,
     TaskStarted,
+    SubmitMultilineInputEvent,
 )
+from ain.ui.views.multiline_input_view import MultilineInputView
 
 # Maximum log lines retained in the stream panel buffer.
 _MAX_LOG_LINES = 200
@@ -146,6 +151,14 @@ class _TaskEntry:
 
 
 @dataclass
+class _KeyPress:
+    key: str
+    ctrl: bool = False
+    alt: bool = False
+    shift: bool = False
+
+
+@dataclass
 class _RendererState:
     run_id: str | None = None
     run_status: str = "idle"
@@ -173,6 +186,8 @@ class _RendererState:
     # In-TUI input state (set when pipeline needs user input)
     input_prompt: str | None = None
     input_buffer: str = ""
+    # Fullscreen multiline input overlay
+    multiline_view: MultilineInputView | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -180,9 +195,9 @@ class _RendererState:
 # -----------------------------------------------------------------------------
 
 class _KeyboardPoller:
-    """Reads keypresses in a daemon thread and calls *callback* with a key name."""
+    """Reads keypresses in a daemon thread and calls *callback* with a key event."""
 
-    def __init__(self, callback: Callable[[str], None]) -> None:
+    def __init__(self, callback: Callable[[_KeyPress], None]) -> None:
         self._callback = callback
         self._stopped = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -207,20 +222,22 @@ class _KeyboardPoller:
         while not self._stopped.is_set():
             if msvcrt.kbhit():
                 ch = msvcrt.getch()
+                ctrl, alt, shift = self._modifiers_windows()
                 if ch in (b"\x00", b"\xe0"):
                     # Extended key: read the scan code.
                     ch2 = msvcrt.getch()
                     if ch2 == b"H":
-                        self._callback("up")
+                        self._callback(_KeyPress("up", ctrl=ctrl, alt=alt, shift=shift))
                     elif ch2 == b"P":
-                        self._callback("down")
+                        self._callback(_KeyPress("down", ctrl=ctrl, alt=alt, shift=shift))
                     elif ch2 == b"K":
-                        self._callback("left")
+                        self._callback(_KeyPress("left", ctrl=ctrl, alt=alt, shift=shift))
                     elif ch2 == b"M":
-                        self._callback("right")
+                        self._callback(_KeyPress("right", ctrl=ctrl, alt=alt, shift=shift))
                 else:
                     try:
-                        self._callback(ch.decode("utf-8", errors="ignore"))
+                        decoded = ch.decode("utf-8", errors="ignore")
+                        self._callback(_KeyPress(decoded, ctrl=ctrl, alt=alt, shift=shift))
                     except Exception:
                         pass
             self._stopped.wait(0.05)
@@ -248,23 +265,34 @@ class _KeyboardPoller:
                     if next1 == "[":
                         next2 = sys.stdin.read(1)
                         if next2 == "A":
-                            self._callback("up")
+                            self._callback(_KeyPress("up"))
                         elif next2 == "B":
-                            self._callback("down")
+                            self._callback(_KeyPress("down"))
                         elif next2 == "D":
-                            self._callback("left")
+                            self._callback(_KeyPress("left"))
                         elif next2 == "C":
-                            self._callback("right")
+                            self._callback(_KeyPress("right"))
                     else:
                         # Plain ESC (or unrecognised sequence).
-                        self._callback("\x1b")
+                        self._callback(_KeyPress("\x1b"))
                 else:
-                    self._callback(ch)
+                    self._callback(_KeyPress(ch))
         finally:
             try:
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
             except termios.error:
                 pass
+
+    @staticmethod
+    def _modifiers_windows() -> tuple[bool, bool, bool]:
+        try:
+            import ctypes
+        except ImportError:
+            return False, False, False
+
+        user32 = ctypes.windll.user32
+        pressed = lambda vk: bool(user32.GetKeyState(vk) & 0x8000)  # noqa: E731
+        return pressed(0x11), pressed(0x12), pressed(0x10)  # Ctrl, Alt, Shift
 
 
 # -----------------------------------------------------------------------------
@@ -297,6 +325,7 @@ class RichLiveRenderer:
         refresh_per_second: int = 4,
         enable_keyboard: bool = True,
         version: str = "0.1.8",
+        emitter: Emitter | None = None,
         on_quit: Callable[[], None] | None = None,
         on_restart: Callable[[], None] | None = None,
         on_approve: Callable[[], None] | None = None,
@@ -323,6 +352,7 @@ class RichLiveRenderer:
         # Input gate: set() when the user submits input inside the TUI
         self._input_ready = threading.Event()
         self._input_result: str = ""
+        self._emitter: Emitter | None = emitter
 
     def configure_mode_controls(
         self,
@@ -335,6 +365,10 @@ class RichLiveRenderer:
             self._cycle_mode_cb = cycle_callback
             if self._live is not None:
                 self._live.update(self._render_root())
+
+    def attach_emitter(self, emitter: Emitter | None) -> None:
+        """Allow the renderer to emit events (submit/cancel) back to the pipeline."""
+        self._emitter = emitter
 
     # -----------------------------------------------------------------------------
     # Public renderer interface
@@ -432,7 +466,9 @@ class RichLiveRenderer:
     # Keyboard state
     # -----------------------------------------------------------------------------
 
-    def _handle_key(self, key: str) -> None:
+    def _handle_key(self, key: _KeyPress | str) -> None:
+        if isinstance(key, str):
+            key = _KeyPress(key)
         with self._lock:
             self._dispatch_key(key)
             if self._live is not None:
@@ -442,33 +478,40 @@ class RichLiveRenderer:
         """Render the live layout with a fixed 4-line top padding."""
         return Padding(self._build_layout(), (1, 1, 1, 1))
 
-    def _dispatch_key(self, key: str) -> None:
+    def _dispatch_key(self, key: _KeyPress) -> None:
         state = self._state
-        key_norm = key.lower() if len(key) == 1 else key
+        key_norm = key.key.lower() if len(key.key) == 1 else key.key
+        ctrl = key.ctrl
+        alt = key.alt
+        shift = key.shift
+
+        if state.multiline_view is not None:
+            self._handle_multiline_key(state.multiline_view, key)
+            return
 
         # -"?-"? In-TUI input mode -"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?
         if state.input_prompt is not None:
-            if key in ("\r", "\n"):
+            if key.key in ("\r", "\n"):
                 # Submit: capture result and signal the waiting thread.
                 self._input_result = state.input_buffer
                 state.input_prompt = None
                 state.input_buffer = ""
                 self._input_ready.set()
-            elif key in ("\x7f", "\x08"):  # Backspace / DEL
+            elif key.key in ("\x7f", "\x08"):  # Backspace / DEL
                 state.input_buffer = state.input_buffer[:-1]
-            elif key == "\x1b":            # Escape -> clear buffer
+            elif key.key == "\x1b":            # Escape -> clear buffer
                 state.input_buffer = ""
-            elif len(key) == 1 and key.isprintable():
-                state.input_buffer += key
+            elif len(key.key) == 1 and key.key.isprintable():
+                state.input_buffer += key.key
             return  # absorb all keys while input panel is open
 
         # Quit confirmation flow.
         if state.quit_confirm:
-            if key in ("\r", "\n", "y", "Y"):
+            if key.key in ("\r", "\n", "y", "Y"):
                 state.quit_confirm = False
                 self._trigger_quit()
                 return
-            elif key == "\x1b" or key in ("n", "N"):
+            elif key.key == "\x1b" or key.key in ("n", "N"):
                 state.quit_confirm = False
                 return
             # Any other key while confirming: cancel confirmation.
@@ -495,16 +538,16 @@ class RichLiveRenderer:
                 if isinstance(details, dict):
                     self._mode_details = dict(details)
 
-        elif key in ("left", "right"):
+        elif key.key in ("left", "right"):
             if state.view_mode == "normal":
                 current_idx = self._FOCUS_ORDER.index(state.focused_panel)
-                step = -1 if key == "left" else 1
+                step = -1 if key.key == "left" else 1
                 state.focused_panel = self._FOCUS_ORDER[(current_idx + step) % len(self._FOCUS_ORDER)]
 
         elif key_norm == "d":
             state.view_mode = "normal" if state.view_mode == "logs" else "logs"
 
-        elif key == "?":
+        elif key.key == "?":
             state.view_mode = "normal" if state.view_mode == "help" else "help"
 
         elif key_norm == "a":
@@ -527,15 +570,47 @@ class RichLiveRenderer:
                 if state.agent_autoscroll:
                     state.agent_scroll_offset = 0
 
-        elif key == "up":
+        elif key.key == "up":
             self._scroll_panel(state.focused_panel, 1)
 
-        elif key == "down":
+        elif key.key == "down":
             self._scroll_panel(state.focused_panel, -1)
 
         elif key_norm == "a" and state.awaiting_approval:
             if self._on_approve is not None:
                 self._on_approve()
+
+    def _handle_multiline_key(self, view: MultilineInputView, key: _KeyPress) -> None:
+        """Route keypresses to the multiline overlay and emit submit/cancel events."""
+        state = self._state
+        # Allow Ctrl+S as a portable submit fallback.
+        key_for_view = "submit" if key.key == "\x13" else key.key
+        result = view.handle_key(
+            key_for_view,
+            ctrl=key.ctrl,
+            alt=key.alt,
+            shift=key.shift,
+        )
+        if result.is_submit:
+            self._emit_multiline_submit(view, result.value or "")
+            state.multiline_view = None
+        elif result.is_cancel:
+            self._emit_multiline_cancel(view)
+            state.multiline_view = None
+
+    def _emit_multiline_submit(self, view: MultilineInputView, value: str) -> None:
+        if self._emitter is not None:
+            try:
+                self._emitter.submit_multiline_input(id=view.id, mode=view.mode, value=value)
+            except Exception:
+                pass
+
+    def _emit_multiline_cancel(self, view: MultilineInputView) -> None:
+        if self._emitter is not None:
+            try:
+                self._emitter.cancel_multiline_input(id=view.id, mode=view.mode)
+            except Exception:
+                pass
 
     def _trigger_quit(self) -> None:
         if self._on_quit is not None:
@@ -617,6 +692,7 @@ class RichLiveRenderer:
             state.tasks = self._load_task_entries()
             state.agent_output.clear()
             state.agent_name = ""
+            state.multiline_view = None
 
         elif isinstance(event, StageQueued):
             state.stages.append(
@@ -705,6 +781,27 @@ class RichLiveRenderer:
             state.run_status = event.status.value
             state.awaiting_approval = False
             state.ended_at = time.monotonic()
+            state.multiline_view = None
+
+        elif isinstance(event, OpenMultilineInputEvent):
+            state.multiline_view = MultilineInputView(
+                id=event.id,
+                title=event.title,
+                prompt=event.prompt,
+                initial_text=event.initial_text or "",
+                mode=event.mode,
+                source_stage=event.source_stage,
+                body_height=self._multiline_body_height(),
+            )
+            state.input_prompt = None
+
+        elif isinstance(event, SubmitMultilineInputEvent):
+            if state.multiline_view and state.multiline_view.id == event.id:
+                state.multiline_view = None
+
+        elif isinstance(event, CancelMultilineInputEvent):
+            if state.multiline_view and state.multiline_view.id == event.id:
+                state.multiline_view = None
 
     def _find_stage(self, stage_id: str) -> _StageEntry | None:
         for entry in self._state.stages:
@@ -752,6 +849,17 @@ class RichLiveRenderer:
 
     def _build_layout(self) -> Layout:
         state = self._state
+        if state.multiline_view is not None:
+            state.multiline_view.set_body_height(self._multiline_body_height())
+            keybar = self._build_keybar()
+            layout = Layout()
+            layout.split_column(
+                Layout(self._build_status_bar(), name="status", size=3),
+                Layout(state.multiline_view.render(), name="multiline"),
+                Layout(keybar, name="keybar", size=4),
+            )
+            return layout
+
         has_input = state.input_prompt is not None
         keybar = self._build_keybar()
         keybar_size = 4
@@ -1185,6 +1293,12 @@ class RichLiveRenderer:
         if minutes:
             return f"{minutes}m {seconds:02d}s"
         return f"{seconds}s"
+
+    def _multiline_body_height(self) -> int:
+        """Estimate body rows available for the multiline overlay."""
+        total = self._console.size.height
+        reserved = 3 + 4 + 6  # status + keybar + header/prompt/footer padding
+        return max(5, total - reserved)
 
 
 def _short_ts(ts: str) -> str:

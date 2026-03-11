@@ -46,7 +46,7 @@ class MultilineInputState:
     id: str
     title: str
     prompt: str
-    initial_text: str | None = None
+    initial_text: str = ""
     value: str = ""
     mode: MultilineInputMode = MultilineInputMode.FEATURE_DESCRIPTION
     is_active: bool = False

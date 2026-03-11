@@ -14,6 +14,7 @@ class RichRenderer(RichLiveRenderer):
         super().__init__(version=version, **kwargs)
 
     def subscribe(self, emitter: Any) -> None:
+        self.attach_emitter(emitter)
         emitter.subscribe(self.handle)
 
 

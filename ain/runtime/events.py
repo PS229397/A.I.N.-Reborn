@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Union
 
-from ain.models.state import HealthSummary, StageTiming
+from ain.models.state import HealthSummary, MultilineInputMode, StageTiming
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +202,40 @@ class ApprovedEvent:
 
 
 # ---------------------------------------------------------------------------
+# Multiline input
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class OpenMultilineInputEvent:
+    """Emitted when the UI should open a multiline input overlay."""
+
+    id: str
+    mode: MultilineInputMode
+    title: str
+    prompt: str
+    initial_text: Optional[str] = None
+    source_stage: str = ""
+
+
+@dataclass
+class SubmitMultilineInputEvent:
+    """Emitted when a multiline input value has been submitted."""
+
+    id: str
+    mode: MultilineInputMode
+    value: str
+
+
+@dataclass
+class CancelMultilineInputEvent:
+    """Emitted when the active multiline input view is cancelled."""
+
+    id: str
+    mode: MultilineInputMode
+
+
+# ---------------------------------------------------------------------------
 # Health and timings
 # ---------------------------------------------------------------------------
 
@@ -243,6 +277,9 @@ AnyEvent = Union[
     ApprovalReceived,
     WaitingApprovalEvent,
     ApprovedEvent,
+    OpenMultilineInputEvent,
+    SubmitMultilineInputEvent,
+    CancelMultilineInputEvent,
     PlannedFileChangeStarted,
     PlannedFileChangeCompleted,
     HealthCheckResult,
@@ -271,6 +308,9 @@ __all__ = [
     "ApprovalReceived",
     "WaitingApprovalEvent",
     "ApprovedEvent",
+    "OpenMultilineInputEvent",
+    "SubmitMultilineInputEvent",
+    "CancelMultilineInputEvent",
     "HealthCheckResult",
     "StageTimingUpdated",
     "AnyEvent",

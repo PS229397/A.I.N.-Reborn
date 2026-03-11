@@ -43,12 +43,13 @@ from pathlib import Path
 from textwrap import dedent
 from typing import Any
 
-from ain.models.state import PlannedFileChange, StageTiming
+from ain.models.state import MultilineInputMode, MultilineInputState, PlannedFileChange, StageTiming
 from ain.runtime.emitter import Emitter
 from ain.runtime.events import (
     ApprovedEvent,
     ApprovalReceived,
     AwaitingApproval,
+    CancelMultilineInputEvent,
     HealthCheckResult,
     LogLevel,
     LogLine,
@@ -65,6 +66,7 @@ from ain.runtime.events import (
     TaskFailed,
     TaskStarted,
     AgentOutput,
+    SubmitMultilineInputEvent,
     WaitingApprovalEvent,
 )
 from ain.services import config_service, log_service, state_service
@@ -1910,6 +1912,344 @@ def _collect_multiline_input(prompt_header: str) -> str:
             _RENDERER.resume()
 
 
+_TASK_DENIAL_CONTEXT_PREFIX = "approval.task_denial"
+_TASK_DENIAL_TITLE = "Explain why you are denying this task"
+_TASK_DENIAL_PROMPT_TEMPLATE = (
+    "Explain why you are denying this task so planning can be rerun with your feedback.\n\n"
+    "Task {task_id}: {description}"
+)
+
+
+def _truncate_for_prompt(text: str, max_len: int = 600) -> str:
+    text = text.strip()
+    return text if len(text) <= max_len else f"{text[: max_len - 3]}..."
+
+
+def _persist_task_denial_feedback(
+    feedback: str,
+    context_id: str,
+    *,
+    service_state: Any | None = None,
+) -> None:
+    """Persist denial feedback through the state service (best-effort)."""
+    try:
+        svc_state = service_state or state_service.load_state(state_path=STATE_FILE)
+        state_service.complete_multiline_input(
+            svc_state,
+            feedback,
+            MultilineInputMode.TASK_DENIAL_FEEDBACK,
+            context_id,
+            state_path=STATE_FILE,
+        )
+    except Exception as exc:  # noqa: BLE001
+        warn(f"Unable to persist task denial feedback: {exc}")
+
+
+def _collect_task_denial_feedback(
+    task_id: str,
+    task_description: str,
+    *,
+    source_stage: str = "waiting_approval",
+) -> str:
+    """
+    Collect multiline feedback for a denied task.
+
+    Uses the Rich multiline input flow when an emitter/renderer is active,
+    falling back to the legacy inline prompt otherwise.
+    """
+
+    context_id = f"{_TASK_DENIAL_CONTEXT_PREFIX}.{task_id}"
+    normalized_description = " ".join(task_description.split())
+
+    service_state: Any | None = None
+    existing = ""
+    try:
+        service_state = state_service.load_state(state_path=STATE_FILE)
+        existing = (
+            service_state.task_denial_feedback_by_task_id.get(context_id, "")
+            if getattr(service_state, "task_denial_feedback_by_task_id", None)
+            else ""
+        )
+        active_ctx = getattr(service_state, "multiline_input", None)
+        if (
+            active_ctx
+            and getattr(active_ctx, "id", "") == context_id
+            and getattr(active_ctx, "mode", None) == MultilineInputMode.TASK_DENIAL_FEEDBACK
+        ):
+            existing = (getattr(active_ctx, "value", "") or getattr(active_ctx, "initial_text", "") or existing).strip()
+    except Exception as exc:  # noqa: BLE001
+        warn(f"Could not load persisted denial feedback: {exc}")
+
+    # Plain/legacy path (no emitter)
+    if _EMITTER is None:
+        feedback = _collect_multiline_input(
+            f"Task denied - what should be different?\nTask {task_id}: {normalized_description}"
+        )
+        _persist_task_denial_feedback(feedback, context_id, service_state=service_state)
+        return feedback.strip()
+
+    # Prepare multiline input context for the TUI path
+    ctx = MultilineInputState(
+        id=context_id,
+        title=_TASK_DENIAL_TITLE,
+        prompt=_truncate_for_prompt(
+            _TASK_DENIAL_PROMPT_TEMPLATE.format(task_id=task_id, description=normalized_description)
+        ),
+        initial_text=existing,
+        value=existing,
+        mode=MultilineInputMode.TASK_DENIAL_FEEDBACK,
+        source_stage=source_stage,
+    )
+
+    renderer_resumed = False
+    if _RENDERER is not None and hasattr(_RENDERER, "resume"):
+        try:
+            _RENDERER.resume()
+            renderer_resumed = True
+        except Exception:
+            renderer_resumed = False
+
+    try:
+        try:
+            svc_state = service_state or state_service.load_state(state_path=STATE_FILE)
+            service_state = svc_state
+            state_service.start_multiline_input(svc_state, ctx, state_path=STATE_FILE)
+        except Exception as exc:  # noqa: BLE001
+            warn(f"Unable to start multiline denial input UI; falling back to inline prompt: {exc}")
+            feedback = _collect_multiline_input(
+                f"Task denied - what should be different?\nTask {task_id}: {normalized_description}"
+            )
+            _persist_task_denial_feedback(feedback, context_id, service_state=service_state)
+            return feedback.strip()
+
+        submitted: dict[str, str | None] = {"value": None}
+        cancelled = False
+        done = threading.Event()
+
+        def _on_event(event: Any) -> None:
+            nonlocal service_state, cancelled
+            if isinstance(event, SubmitMultilineInputEvent) and event.id == ctx.id:
+                try:
+                    svc_state = service_state or state_service.load_state(state_path=STATE_FILE)
+                    state_service.complete_multiline_input(
+                        svc_state,
+                        event.value,
+                        event.mode,
+                        event.id,
+                        state_path=STATE_FILE,
+                    )
+                    service_state = svc_state
+                except Exception as exc2:  # noqa: BLE001
+                    warn(f"Unable to persist task denial submission: {exc2}")
+                submitted["value"] = event.value
+                done.set()
+            elif isinstance(event, CancelMultilineInputEvent) and event.id == ctx.id:
+                try:
+                    svc_state = service_state or state_service.load_state(state_path=STATE_FILE)
+                    state_service.cancel_multiline_input(svc_state, event.id, state_path=STATE_FILE)
+                    service_state = svc_state
+                except Exception as exc2:  # noqa: BLE001
+                    warn(f"Unable to cancel task denial input cleanly: {exc2}")
+                cancelled = True
+                done.set()
+
+        _EMITTER.subscribe(_on_event)
+        try:
+            _EMITTER.open_multiline_input(
+                id=ctx.id,
+                mode=ctx.mode,
+                title=ctx.title,
+                prompt=ctx.prompt,
+                initial_text=ctx.initial_text,
+                source_stage=ctx.source_stage,
+            )
+            while not done.wait(0.2):
+                pass
+        finally:
+            _EMITTER.unsubscribe(_on_event)
+
+        if cancelled:
+            warn("Task denial feedback input cancelled. Aborting run.")
+            sys.exit(0)
+
+        feedback = (submitted["value"] or existing).strip()
+        _persist_task_denial_feedback(feedback, context_id, service_state=service_state)
+        return feedback
+    finally:
+        if renderer_resumed and _RENDERER is not None and hasattr(_RENDERER, "suspend"):
+            try:
+                _RENDERER.suspend()
+            except Exception:
+                pass
+
+
+_FEATURE_DESCRIPTION_CONTEXT_ID = "planning.feature_description"
+_FEATURE_DESCRIPTION_TITLE = "Describe the feature or bug"
+_FEATURE_DESCRIPTION_PROMPT = (
+    "Provide a clear, multi-paragraph summary of the feature or bug. "
+    "This description feeds the planning agents and is saved to .ai-pipeline/user_context.md."
+)
+
+
+def _persist_feature_description(
+    description: str,
+    state: dict[str, Any],
+    *,
+    service_state: Any = None,
+) -> None:
+    """Persist the feature description to disk and keep state in sync."""
+
+    normalized = description.strip()
+    if not normalized:
+        return
+
+    state["feature_description"] = normalized
+    USER_CONTEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    USER_CONTEXT_FILE.write_text(normalized, encoding="utf-8")
+
+    try:
+        svc_state = service_state or state_service.load_state(state_path=STATE_FILE)
+        state_service.complete_multiline_input(
+            svc_state,
+            normalized,
+            MultilineInputMode.FEATURE_DESCRIPTION,
+            _FEATURE_DESCRIPTION_CONTEXT_ID,
+            state_path=STATE_FILE,
+        )
+    except Exception as exc:  # noqa: BLE001 - persistence must not crash the run
+        warn(f"Could not persist feature description to state service: {exc}")
+
+
+def _ensure_feature_description(state: dict[str, Any], *, source_stage: str) -> str:
+    """
+    Ensure the feature description is available, preferring the Rich multiline input
+    flow when a renderer/emitter is active, with a plain fallback otherwise.
+    """
+
+    existing = (state.get("feature_description") or "").strip()
+    if not existing and USER_CONTEXT_FILE.exists():
+        existing = USER_CONTEXT_FILE.read_text(encoding="utf-8").strip()
+
+    service_state: Any = None
+    try:
+        service_state = state_service.load_state(state_path=STATE_FILE)
+        if not existing and getattr(service_state, "feature_description", ""):
+            existing = service_state.feature_description.strip()
+        active_ctx = getattr(service_state, "multiline_input", None)
+        if (
+            not existing
+            and active_ctx
+            and getattr(active_ctx, "mode", None) == MultilineInputMode.FEATURE_DESCRIPTION
+        ):
+            existing = (getattr(active_ctx, "value", "") or getattr(active_ctx, "initial_text", "")).strip()
+    except Exception as exc:  # noqa: BLE001 - fall back gracefully
+        warn(f"Could not load persisted feature description: {exc}")
+
+    if existing:
+        _persist_feature_description(existing, state, service_state=service_state)
+        return existing
+
+    # No TUI renderer: use the legacy inline prompt.
+    if _EMITTER is None:
+        description = _collect_multiline_input("A.I.N. - Describe the feature or bug")
+        if not description:
+            warn("No description provided. Please re-run and describe your feature.")
+            sys.exit(0)
+        _persist_feature_description(description, state, service_state=service_state)
+        return description
+
+    if service_state is None:
+        try:
+            service_state = state_service.load_state(state_path=STATE_FILE)
+        except Exception as exc:  # noqa: BLE001
+            warn(f"Could not prepare multiline input state. Falling back to inline prompt: {exc}")
+            description = _collect_multiline_input("A.I.N. - Describe the feature or bug")
+            if not description:
+                warn("No description provided. Please re-run and describe your feature.")
+                sys.exit(0)
+            _persist_feature_description(description, state)
+            return description
+
+    ctx = MultilineInputState(
+        id=_FEATURE_DESCRIPTION_CONTEXT_ID,
+        title=_FEATURE_DESCRIPTION_TITLE,
+        prompt=_FEATURE_DESCRIPTION_PROMPT,
+        initial_text=existing,
+        value=existing,
+        mode=MultilineInputMode.FEATURE_DESCRIPTION,
+        source_stage=source_stage,
+    )
+
+    try:
+        state_service.start_multiline_input(service_state, ctx, state_path=STATE_FILE)
+    except Exception as exc:  # noqa: BLE001
+        warn(f"Unable to start multiline input UI; falling back to inline prompt: {exc}")
+        description = _collect_multiline_input("A.I.N. - Describe the feature or bug")
+        if not description:
+            warn("No description provided. Please re-run and describe your feature.")
+            sys.exit(0)
+        _persist_feature_description(description, state, service_state=service_state)
+        return description
+
+    submitted: dict[str, str | None] = {"value": None}
+    cancelled = False
+    done = threading.Event()
+
+    def _on_event(event: Any) -> None:
+        nonlocal service_state, cancelled
+        if isinstance(event, SubmitMultilineInputEvent) and event.id == ctx.id:
+            try:
+                svc_state = service_state or state_service.load_state(state_path=STATE_FILE)
+                state_service.complete_multiline_input(
+                    svc_state,
+                    event.value,
+                    event.mode,
+                    event.id,
+                    state_path=STATE_FILE,
+                )
+                service_state = svc_state
+            except Exception as exc2:  # noqa: BLE001
+                warn(f"Unable to persist submitted description: {exc2}")
+            submitted["value"] = event.value
+            done.set()
+        elif isinstance(event, CancelMultilineInputEvent) and event.id == ctx.id:
+            try:
+                svc_state = service_state or state_service.load_state(state_path=STATE_FILE)
+                state_service.cancel_multiline_input(svc_state, event.id, state_path=STATE_FILE)
+                service_state = svc_state
+            except Exception as exc2:  # noqa: BLE001
+                warn(f"Unable to cancel feature description input cleanly: {exc2}")
+            cancelled = True
+            done.set()
+
+    _EMITTER.subscribe(_on_event)
+    try:
+        _EMITTER.open_multiline_input(
+            id=ctx.id,
+            mode=ctx.mode,
+            title=ctx.title,
+            prompt=ctx.prompt,
+            initial_text=ctx.initial_text,
+            source_stage=ctx.source_stage,
+        )
+        while not done.wait(0.2):
+            pass
+    finally:
+        _EMITTER.unsubscribe(_on_event)
+
+    if cancelled:
+        warn("Feature description input cancelled. Aborting run.")
+        sys.exit(0)
+
+    description = (submitted["value"] or "").strip()
+    if not description:
+        warn("Feature description cannot be empty.")
+        sys.exit(0)
+
+    _persist_feature_description(description, state, service_state=service_state)
+    return description
+
+
 def _wait_for_user(prompt: str) -> None:
     """Block until the user acknowledges.  In TUI mode the input panel is used;
     in plain mode a regular input() call is made."""
@@ -1925,27 +2265,29 @@ def _wait_for_user(prompt: str) -> None:
         sys.exit(0)
 
 
-def _extract_tasks_for_review() -> list[str]:
-    """Load task descriptions from TASK_GRAPH.json, with TASKS.md fallback."""
+def _extract_tasks_for_review() -> list[dict[str, Any]]:
+    """Load tasks (id + description) from TASK_GRAPH.json, with TASKS.md fallback."""
     if TASK_GRAPH_FILE.exists():
         try:
             data = json.loads(TASK_GRAPH_FILE.read_text(encoding="utf-8"))
-            tasks = [
-                str(t.get("description", "")).strip()
-                for t in data.get("tasks", [])
-                if str(t.get("description", "")).strip()
-            ]
+            tasks: list[dict[str, Any]] = []
+            for t in data.get("tasks", []):
+                desc = str(t.get("description", "")).strip()
+                if not desc:
+                    continue
+                tid = t.get("id", len(tasks) + 1)
+                tasks.append({"id": str(tid), "description": desc})
             if tasks:
                 return tasks
         except Exception:
             pass
 
     if TASKS_FILE.exists():
-        tasks: list[str] = []
-        for line in TASKS_FILE.read_text(encoding="utf-8").splitlines():
+        tasks: list[dict[str, Any]] = []
+        for i, line in enumerate(TASKS_FILE.read_text(encoding="utf-8").splitlines(), start=1):
             s = line.strip()
             if s.startswith("- [ ] ") or s.startswith("- [x] "):
-                tasks.append(s[6:].strip())
+                tasks.append({"id": str(i), "description": s[6:].strip()})
         if tasks:
             return tasks
 
@@ -2008,7 +2350,7 @@ def _read_keypress() -> str:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
-def _render_task_review_popup(tasks: list[str], selected_row: int, decisions: list[bool]) -> None:
+def _render_task_review_popup(tasks: list[dict[str, Any]], selected_row: int, decisions: list[bool]) -> None:
     from rich.console import Console as RichConsole
     from rich.panel import Panel
     from rich.text import Text
@@ -2022,6 +2364,12 @@ def _render_task_review_popup(tasks: list[str], selected_row: int, decisions: li
     body.append("Review task list before implementation\n\n", style=f"bold {rich_cyan}")
 
     for idx, task in enumerate(tasks):
+        task_id = str(task.get("id", idx + 1))
+        if task_id.isdigit() and len(task_id) < 2:
+            task_label = task_id.zfill(2)
+        else:
+            task_label = task_id
+        task_desc = task.get("description", "")
         is_selected = idx == selected_row
         cursor = "► " if is_selected else "  "
         cursor_style = f"bold {rich_pink}" if is_selected else rich_dim
@@ -2029,7 +2377,7 @@ def _render_task_review_popup(tasks: list[str], selected_row: int, decisions: li
         status = "ACCEPT" if decisions[idx] else "DENY"
         status_style = rich_cyan if decisions[idx] else "yellow"
         body.append(cursor, style=cursor_style)
-        body.append(f"{idx+1:02d}. {task}\n", style=row_style)
+        body.append(f"{task_label}. {task_desc}\n", style=row_style)
         body.append("   [", style=rich_dim)
         body.append(status, style=status_style)
         body.append("]\n", style=rich_dim)
@@ -2057,14 +2405,14 @@ def _render_task_review_popup(tasks: list[str], selected_row: int, decisions: li
     console.print(panel)
 
 
-def _review_tasks_with_popup(tasks: list[str]) -> tuple[bool, str]:
+def _review_tasks_with_popup(tasks: list[dict[str, Any]]) -> tuple[bool, str]:
     """Interactive task review. Returns (approved, feedback)."""
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         print()
         choice = input("  Approve generated tasks? [y/n]: ").strip().lower()
         if choice in ("y", "yes"):
             return True, ""
-        feedback = _collect_multiline_input("Task list denied - what should be different?")
+        feedback = _collect_task_denial_feedback("task_list", "Task list")
         return False, feedback
 
     decisions = [True] * len(tasks)
@@ -2084,8 +2432,17 @@ def _review_tasks_with_popup(tasks: list[str]) -> tuple[bool, str]:
             print("\033[2J\033[H", end="")
             if approved:
                 return True, ""
-            feedback = _collect_multiline_input("Task list denied  what should be different#")
-            return False, feedback
+            denied_indices = [i for i, decision in enumerate(decisions) if not decision]
+            feedback_entries: list[str] = []
+            for idx in denied_indices:
+                task = tasks[idx]
+                task_id = str(task.get("id", idx + 1))
+                task_desc = task.get("description", f"Task {task_id}")
+                feedback = _collect_task_denial_feedback(task_id, task_desc)
+                if feedback.strip():
+                    feedback_entries.append(f"[{task_id}] {feedback.strip()}")
+            combined_feedback = "\n".join(feedback_entries).strip()
+            return False, combined_feedback
         elif key == "quit":
             raise KeyboardInterrupt
 
@@ -2128,15 +2485,16 @@ def run_planning_questions(state: dict, config: dict) -> None:
     banner("Stage: Planning  Brainstorm (Codex)")
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
+    feature_description = _ensure_feature_description(state, source_stage="planning_questions")
+
     # Brief pause so the TUI can fully settle after the user_context
     # suspend/resume cycle before we suspend again for Codex.
     time.sleep(1.5)
 
-    user_ctx = USER_CONTEXT_FILE.read_text(encoding="utf-8") if USER_CONTEXT_FILE.exists() else ""
     arch_ctx = ARCHITECTURE_FILE.read_text(encoding="utf-8") if ARCHITECTURE_FILE.exists() else ""
 
     BRAINSTORM_CONTEXT_FILE.write_text(
-        f"# Brainstorm Context\n\n## Feature Request\n\n{user_ctx}\n\n"
+        f"# Brainstorm Context\n\n## Feature Request\n\n{feature_description}\n\n"
         f"## Architecture Overview\n\n{arch_ctx[:4000]}\n",
         encoding="utf-8",
     )
@@ -2499,6 +2857,8 @@ def run_planning_generation(state: dict, config: dict) -> None:
     agent_key = resolve_stage_agent_key("planning_generation", state, config)
     banner(f"Stage: Planning  Generation [mode={mode} agent={agent_key}]")
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
+
+    _ensure_feature_description(state, source_stage="planning_generation")
 
     prompt_file = PROMPTS_DIR / "planning_generation_prompt.md"
     ctx_files = [

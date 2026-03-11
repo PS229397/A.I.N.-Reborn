@@ -5,10 +5,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Callable, List
 
-from ain.models.state import HealthSummary, StageTiming
+from ain.models.state import HealthSummary, MultilineInputMode, StageTiming
 from ain.runtime.events import (
     AnyEvent,
+    CancelMultilineInputEvent,
     HealthCheckResult,
+    OpenMultilineInputEvent,
     PlannedFileChangeCompleted,
     PlannedFileChangeStarted,
     StageCompleted,
@@ -16,6 +18,7 @@ from ain.runtime.events import (
     StageQueued,
     StageStarted,
     StageTimingUpdated,
+    SubmitMultilineInputEvent,
 )
 
 
@@ -154,6 +157,43 @@ class Emitter:
                 ended_at=ended_at or _now_iso(),
             )
         )
+
+    # ------------------------------------------------------------------
+    # Multiline input helpers
+    # ------------------------------------------------------------------
+
+    def open_multiline_input(
+        self,
+        *,
+        id: str,
+        mode: MultilineInputMode,
+        title: str,
+        prompt: str,
+        initial_text: str | None = None,
+        source_stage: str = "",
+    ) -> None:
+        """Emit an event to open a multiline input overlay in the UI."""
+
+        self.emit(
+            OpenMultilineInputEvent(
+                id=id,
+                mode=mode,
+                title=title,
+                prompt=prompt,
+                initial_text=initial_text,
+                source_stage=source_stage,
+            )
+        )
+
+    def submit_multiline_input(self, *, id: str, mode: MultilineInputMode, value: str) -> None:
+        """Emit an event indicating a multiline input submission."""
+
+        self.emit(SubmitMultilineInputEvent(id=id, mode=mode, value=value))
+
+    def cancel_multiline_input(self, *, id: str, mode: MultilineInputMode) -> None:
+        """Emit an event indicating the active multiline input session was cancelled."""
+
+        self.emit(CancelMultilineInputEvent(id=id, mode=mode))
 
     # ------------------------------------------------------------------
     # Health and timing helpers
