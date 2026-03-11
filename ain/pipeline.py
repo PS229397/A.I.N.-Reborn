@@ -2408,6 +2408,37 @@ def _render_task_review_popup(tasks: list[dict[str, Any]], selected_row: int, de
 
 def _review_tasks_with_popup(tasks: list[dict[str, Any]]) -> tuple[bool, str]:
     """Interactive task review. Returns (approved, feedback)."""
+    if _RENDERER is not None and hasattr(_RENDERER, "request_task_approval"):
+        normalized_tasks = [
+            {
+                "id": str(task.get("id", idx + 1)),
+                "description": str(task.get("description", "")).strip(),
+            }
+            for idx, task in enumerate(tasks)
+        ]
+        return _RENDERER.request_task_approval(normalized_tasks)
+
+    if _RENDERER is not None and hasattr(_RENDERER, "request_input"):
+        info("Review task list before implementation:")
+        for task in tasks:
+            task_id = str(task.get("id", ""))
+            task_desc = str(task.get("description", "")).strip()
+            if task_desc:
+                info(f"  [{task_id}] {task_desc}")
+
+        while True:
+            choice = _RENDERER.request_input(
+                "Task review: type 'approve' or 'deny' (q to cancel run)"
+            ).strip().lower()
+            if choice in {"approve", "a", "yes", "y"}:
+                return True, ""
+            if choice in {"deny", "d", "no", "n"}:
+                feedback = _collect_task_denial_feedback("task_list", "Task list")
+                return False, feedback
+            if choice in {"q", "quit", "cancel"}:
+                raise KeyboardInterrupt
+            warn("Please enter approve or deny.")
+
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         print()
         choice = input("  Approve generated tasks? [y/n]: ").strip().lower()
@@ -3373,12 +3404,15 @@ def run_waiting_approval(state: dict, config: dict) -> None:
             print()
             sys.exit(0)
 
-        if _RENDERER is not None:
+        using_tui_task_review = _RENDERER is not None and (
+            hasattr(_RENDERER, "request_task_approval") or hasattr(_RENDERER, "request_input")
+        )
+        if _RENDERER is not None and not using_tui_task_review:
             _RENDERER.suspend()
         try:
             approved, feedback = _review_tasks_with_popup(tasks)
         finally:
-            if _RENDERER is not None:
+            if _RENDERER is not None and not using_tui_task_review:
                 _RENDERER.resume()
 
         if approved:
@@ -4697,18 +4731,25 @@ def main() -> None:
     if args.command == "run":
         config = load_config()
         state = load_state(config)
-        if sys.stdin is not None and sys.stdin.isatty():
+        plain  = getattr(args, "plain", False)
+        interactive_mode_prompt = bool(
+            sys.stdin is not None
+            and sys.stdout is not None
+            and sys.stdin.isatty()
+            and sys.stdout.isatty()
+        )
+        if plain and interactive_mode_prompt:
             selected_mode = prompt_for_pipeline_mode(state, config)
         else:
             selected_mode = get_selected_mode(state, config)
         if selected_mode != get_selected_mode(state, config):
             set_pipeline_mode(selected_mode, state, config)
         single = bool(getattr(args, "stage", None))
-        plain  = getattr(args, "plain", False)
         _run_with_tui(
             start_stage=getattr(args, "resume", None) or getattr(args, "stage", None),
             single_stage=single,
             plain=plain,
+            prompt_mode_selection=interactive_mode_prompt and not plain,
         )
         return
 
@@ -4736,6 +4777,7 @@ def _run_with_tui(
     start_stage: str | None = None,
     single_stage: bool = False,
     plain: bool = False,
+    prompt_mode_selection: bool = False,
 ) -> None:
     """Launch run_pipeline, wrapping in the Rich TUI unless --plain is set."""
     if plain:
@@ -4771,6 +4813,16 @@ def _run_with_tui(
         renderer.start()
         try:
             try:
+                if prompt_mode_selection and hasattr(renderer, "request_mode_selection"):
+                    current_config = load_config()
+                    current_state = load_state(current_config)
+                    available_modes = get_available_pipeline_modes(current_config)
+                    current_mode = get_selected_mode(current_state, current_config)
+                    mode_options = [get_mode_details(mode_key) for mode_key in available_modes]
+                    selected_mode = renderer.request_mode_selection(mode_options, current_mode)
+                    if selected_mode != current_mode:
+                        set_pipeline_mode(selected_mode, current_state, current_config)
+
                 next_start_stage = start_stage
                 next_single_stage = single_stage
                 while True:

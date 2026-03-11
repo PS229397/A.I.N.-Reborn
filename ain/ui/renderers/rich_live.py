@@ -53,6 +53,8 @@ from ain.runtime.events import (
     TaskStarted,
     SubmitMultilineInputEvent,
 )
+from ain.ui.views.approval_view import ApprovalView
+from ain.ui.views.mode_select_view import ModeSelectView
 from ain.ui.views.multiline_input_view import MultilineInputView
 
 # Maximum log lines retained in the stream panel buffer.
@@ -111,7 +113,7 @@ _KEYBAR_ENTRIES: list[tuple[str, str]] = [
 ]
 
 # Approval action shown only when awaiting approval.
-_KEYBAR_APPROVE = ("A", "AUTHORIZE")
+_KEYBAR_APPROVE = None
 
 # Help text lines shown in the help overlay.
 _HELP_LINES: list[tuple[str, str]] = [
@@ -125,7 +127,6 @@ _HELP_LINES: list[tuple[str, str]] = [
     ("?",     "toggle help.sys overlay"),
     ("F",     "freeze / unfreeze focused live pane"),
     ("↑ / ↓", "scroll focused pane"),
-    ("A",     "AUTHORIZE  (awaiting approval only)"),
     ("Esc",   "abort jack-out"),
 ]
 
@@ -188,6 +189,10 @@ class _RendererState:
     input_buffer: str = ""
     # Fullscreen multiline input overlay
     multiline_view: MultilineInputView | None = None
+    # Fullscreen mode-selection overlay
+    mode_select_view: ModeSelectView | None = None
+    # Fullscreen task-approval overlay
+    approval_view: ApprovalView | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -343,7 +348,9 @@ class RichLiveRenderer:
         self._live: Live | None = None
         self._kbd: _KeyboardPoller | None = None
         self._ticker: threading.Thread | None = None
-        self._lock = threading.Lock()
+        # Re-entrant lock avoids deadlock when key handlers emit events that synchronously
+        # call back into `handle()` on this renderer (for example approval denial feedback).
+        self._lock = threading.RLock()
         self._running = False
         self._mode_details: dict[str, str] = {
             "key": "default",
@@ -354,6 +361,12 @@ class RichLiveRenderer:
         # Input gate: set() when the user submits input inside the TUI
         self._input_ready = threading.Event()
         self._input_result: str = ""
+        # Mode-select gate: set() when a mode is selected/cancelled in the TUI.
+        self._mode_select_ready = threading.Event()
+        self._mode_select_result: str = ""
+        # Approval gate: set() when approval interaction completes in the TUI.
+        self._approval_ready = threading.Event()
+        self._approval_result: tuple[bool, str] = (False, "")
         self._emitter: Emitter | None = emitter
 
     def configure_mode_controls(
@@ -412,6 +425,33 @@ class RichLiveRenderer:
         self._input_ready.wait()
         return self._input_result
 
+    def request_mode_selection(self, modes: list[dict[str, str]], current_mode: str) -> str:
+        """Show fullscreen in-TUI mode selector and block until a choice is made."""
+
+        if not modes:
+            return current_mode
+        self._mode_select_ready.clear()
+        self._mode_select_result = current_mode
+        with self._lock:
+            self._state.mode_select_view = ModeSelectView(modes, current_mode=current_mode)
+            if self._live is not None:
+                self._live.update(self._render_root())
+        self._mode_select_ready.wait()
+        return self._mode_select_result or current_mode
+
+    def request_task_approval(self, tasks: list[dict[str, str]]) -> tuple[bool, str]:
+        """Show fullscreen task approval view and block until approved/denied."""
+
+        self._approval_ready.clear()
+        self._approval_result = (False, "")
+        with self._lock:
+            self._state.approval_view = ApprovalView(tasks, emitter=self._emitter)
+            if self._live is not None:
+                self._live.update(self._render_root())
+        while not self._approval_ready.wait(0.1):
+            pass
+        return self._approval_result
+
     def suspend(self) -> None:
         """Temporarily stop Live rendering and keyboard capture."""
         if self._kbd is not None:
@@ -452,6 +492,14 @@ class RichLiveRenderer:
             if result is not None and self._state.run_status not in ("done", "failed", "interrupted"):
                 self._state.run_status = result.value
             self._state.ended_at = time.monotonic()
+            if self._state.mode_select_view is not None and not self._mode_select_ready.is_set():
+                self._mode_select_result = self._state.mode_select_view.current_mode
+                self._state.mode_select_view = None
+                self._mode_select_ready.set()
+            if self._state.approval_view is not None and not self._approval_ready.is_set():
+                self._approval_result = (False, "")
+                self._state.approval_view = None
+                self._approval_ready.set()
             if self._live is not None:
                 self._live.update(self._render_root())
                 self._live.stop()
@@ -482,6 +530,18 @@ class RichLiveRenderer:
 
     def _dispatch_key(self, key: _KeyPress) -> None:
         state = self._state
+        if state.mode_select_view is not None:
+            result = state.mode_select_view.handle_key(key.key)
+            if result.is_select:
+                self._mode_select_result = result.mode or state.mode_select_view.current_mode
+                state.mode_select_view = None
+                self._mode_select_ready.set()
+            elif result.is_cancel:
+                self._mode_select_result = state.mode_select_view.current_mode
+                state.mode_select_view = None
+                self._mode_select_ready.set()
+            return
+
         key_norm = key.key.lower() if len(key.key) == 1 else key.key
         ctrl = key.ctrl
         alt = key.alt
@@ -490,6 +550,20 @@ class RichLiveRenderer:
         if state.multiline_view is not None:
             self._handle_multiline_key(state.multiline_view, key)
             return
+
+        if state.approval_view is not None:
+            approval_keys = {"up", "down", "left", "right", " ", "enter", "return", "\r", "\n"}
+            if key.key in approval_keys or key_norm in approval_keys:
+                result = state.approval_view.handle_key(key.key)
+                if result.is_approved:
+                    self._approval_result = (True, "")
+                    state.approval_view = None
+                    self._approval_ready.set()
+                elif result.is_denied:
+                    self._approval_result = (False, result.feedback)
+                    state.approval_view = None
+                    self._approval_ready.set()
+                return
 
         # -"?-"? In-TUI input mode -"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?-"?
         if state.input_prompt is not None:
@@ -557,11 +631,7 @@ class RichLiveRenderer:
             state.view_mode = "normal" if state.view_mode == "help" else "help"
 
         elif key_norm == "a":
-            if state.awaiting_approval:
-                if self._on_approve is not None:
-                    self._on_approve()
-            else:
-                state.view_mode = "normal" if state.view_mode == "agent" else "agent"
+            state.view_mode = "normal" if state.view_mode == "agent" else "agent"
 
         elif key_norm == "t":
             state.view_mode = "normal" if state.view_mode == "tasks" else "tasks"
@@ -582,9 +652,6 @@ class RichLiveRenderer:
         elif key.key == "down":
             self._scroll_panel(state.focused_panel, -1)
 
-        elif key_norm == "a" and state.awaiting_approval:
-            if self._on_approve is not None:
-                self._on_approve()
 
     def _handle_multiline_key(self, view: MultilineInputView, key: _KeyPress) -> None:
         """Route keypresses to the multiline overlay and emit submit/cancel events."""
@@ -718,6 +785,8 @@ class RichLiveRenderer:
             state.agent_output.clear()
             state.agent_name = ""
             state.multiline_view = None
+            state.mode_select_view = None
+            state.approval_view = None
 
         elif isinstance(event, StageQueued):
             state.stages.append(
@@ -807,6 +876,8 @@ class RichLiveRenderer:
             state.awaiting_approval = False
             state.ended_at = time.monotonic()
             state.multiline_view = None
+            state.mode_select_view = None
+            state.approval_view = None
 
         elif isinstance(event, OpenMultilineInputEvent):
             state.multiline_view = MultilineInputView(
@@ -823,10 +894,18 @@ class RichLiveRenderer:
         elif isinstance(event, SubmitMultilineInputEvent):
             if state.multiline_view and state.multiline_view.id == event.id:
                 state.multiline_view = None
+            if state.approval_view is not None:
+                approval_result = state.approval_view.handle_event(event)
+                if approval_result.is_denied:
+                    self._approval_result = (False, approval_result.feedback)
+                    state.approval_view = None
+                    self._approval_ready.set()
 
         elif isinstance(event, CancelMultilineInputEvent):
             if state.multiline_view and state.multiline_view.id == event.id:
                 state.multiline_view = None
+            if state.approval_view is not None:
+                state.approval_view.handle_event(event)
 
     def _find_stage(self, stage_id: str) -> _StageEntry | None:
         for entry in self._state.stages:
@@ -874,6 +953,16 @@ class RichLiveRenderer:
 
     def _build_layout(self) -> Layout:
         state = self._state
+        if state.mode_select_view is not None:
+            keybar = self._build_keybar()
+            layout = Layout()
+            layout.split_column(
+                Layout(self._build_status_bar(), name="status", size=3),
+                Layout(state.mode_select_view.render(), name="mode_select"),
+                Layout(keybar, name="keybar", size=4),
+            )
+            return layout
+
         if state.multiline_view is not None:
             state.multiline_view.set_body_height(self._multiline_body_height())
             multiline_size = max(5, self._console.size.height - 3 - 4 - 2)
@@ -882,6 +971,17 @@ class RichLiveRenderer:
             layout.split_column(
                 Layout(self._build_status_bar(), name="status", size=3),
                 Layout(state.multiline_view.render(), name="multiline", size=multiline_size),
+                Layout(keybar, name="keybar", size=4),
+            )
+            return layout
+
+        if state.approval_view is not None:
+            approval_size = max(5, self._console.size.height - 3 - 4 - 2)
+            keybar = self._build_keybar()
+            layout = Layout()
+            layout.split_column(
+                Layout(self._build_status_bar(), name="status", size=3),
+                Layout(state.approval_view.render(), name="approval", size=approval_size),
                 Layout(keybar, name="keybar", size=4),
             )
             return layout
@@ -1237,7 +1337,7 @@ class RichLiveRenderer:
             for k, d in entries
         ]
 
-        if state.awaiting_approval:
+        if state.awaiting_approval and _KEYBAR_APPROVE:
             entries.append(_KEYBAR_APPROVE)
 
         bar = Text()

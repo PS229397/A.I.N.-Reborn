@@ -75,6 +75,7 @@ class ApprovalView:
         self._source_stage = source_stage
         self._pending_context_id: str | None = None
         self._pending_task_id: str | None = None
+        self._active_denials: List[str] = []
         self._pending_denials: List[str] = []
         self._awaiting_feedback = False
 
@@ -95,15 +96,21 @@ class ApprovalView:
         elif norm in ("left", "right", " "):
             self._toggle_selected()
         elif norm == "enter":
-            if not self._tasks or not self._denied_task_ids():
+            denied_ids = self._denied_task_ids()
+            if not self._tasks or not denied_ids:
                 return ApprovalResult("approved")
-            opened = self._open_feedback_overlay()
+            denial_queue = self._ordered_denials(denied_ids)
+            opened = self._start_feedback_collection(denial_queue)
             if opened:
                 return ApprovalResult(
                     "awaiting_feedback",
-                    denied_task_ids=list(self._pending_denials),
+                    denied_task_ids=list(denial_queue),
                 )
-            return ApprovalResult("denied", denied_task_ids=self._denied_task_ids(), feedback="")
+            return ApprovalResult(
+                "denied",
+                denied_task_ids=list(denial_queue),
+                feedback=self._combined_feedback(denial_queue),
+            )
 
         return ApprovalResult("none")
 
@@ -115,22 +122,34 @@ class ApprovalView:
 
         if isinstance(event, SubmitMultilineInputEvent):
             if self._matches_pending(event.id, event.mode):
-                self._awaiting_feedback = False
                 feedback = (event.value or "").strip()
                 if self._pending_task_id:
                     self._set_feedback(self._pending_task_id, feedback)
-                result = ApprovalResult(
-                    "denied",
-                    denied_task_ids=list(self._pending_denials),
-                    feedback=feedback,
-                )
+                    if self._pending_denials and self._pending_denials[0] == self._pending_task_id:
+                        self._pending_denials.pop(0)
+                    else:
+                        self._pending_denials = [
+                            task_id for task_id in self._pending_denials if task_id != self._pending_task_id
+                        ]
+                self._awaiting_feedback = False
+                if self._open_next_feedback_overlay():
+                    return ApprovalResult(
+                        "awaiting_feedback",
+                        denied_task_ids=list(self._active_denials),
+                    )
+                denied_task_ids = list(self._active_denials)
+                combined_feedback = self._combined_feedback(denied_task_ids)
                 self._clear_pending()
-                return result
+                return ApprovalResult(
+                    "denied",
+                    denied_task_ids=denied_task_ids,
+                    feedback=combined_feedback,
+                )
 
         elif isinstance(event, CancelMultilineInputEvent):
             if self._matches_pending(event.id, event.mode):
                 self._awaiting_feedback = False
-                result = ApprovalResult("none", denied_task_ids=list(self._pending_denials))
+                result = ApprovalResult("none", denied_task_ids=list(self._active_denials))
                 self._clear_pending()
                 return result
 
@@ -187,17 +206,22 @@ class ApprovalView:
             return
         self._decisions[self._selected_idx] = not self._decisions[self._selected_idx]
 
-    def _open_feedback_overlay(self) -> bool:
-        denied_ids = self._denied_task_ids()
+    def _start_feedback_collection(self, denied_ids: List[str]) -> bool:
         if not denied_ids:
             return False
-        if not self._decisions[self._selected_idx]:
-            target_idx = self._selected_idx
-        else:
-            target_idx = self._find_task_index(denied_ids[0]) or 0
+        self._active_denials = list(denied_ids)
+        self._pending_denials = list(denied_ids)
+        return self._open_next_feedback_overlay()
 
+    def _open_next_feedback_overlay(self) -> bool:
+        if not self._pending_denials:
+            return False
+        target_id = self._pending_denials[0]
+        target_idx = self._find_task_index(target_id)
+        if target_idx is None:
+            self._pending_denials.pop(0)
+            return self._open_next_feedback_overlay()
         target_task = self._tasks[target_idx]
-        target_id = target_task["id"]
         context_id = self._context_id_for(target_id)
         initial = self._feedback_for(target_id)
         description = target_task.get("description", "") if self._tasks else ""
@@ -217,13 +241,20 @@ class ApprovalView:
             )
             self._pending_context_id = context_id
             self._pending_task_id = target_id
-            self._pending_denials = denied_ids
             self._awaiting_feedback = True
             return True
 
         # No emitter available; cannot open multiline overlay.
         self._clear_pending()
         return False
+
+    def _ordered_denials(self, denied_ids: List[str]) -> List[str]:
+        if not denied_ids:
+            return []
+        selected_task_id = self._tasks[self._selected_idx]["id"] if self._tasks else ""
+        if selected_task_id in denied_ids:
+            return [selected_task_id] + [task_id for task_id in denied_ids if task_id != selected_task_id]
+        return list(denied_ids)
 
     @staticmethod
     def _normalize_key(key: str) -> str:
@@ -273,7 +304,16 @@ class ApprovalView:
     def _clear_pending(self) -> None:
         self._pending_context_id = None
         self._pending_task_id = None
+        self._active_denials = []
         self._pending_denials = []
+
+    def _combined_feedback(self, task_ids: Sequence[str]) -> str:
+        entries: List[str] = []
+        for task_id in task_ids:
+            feedback = self._feedback_for(task_id).strip()
+            if feedback:
+                entries.append(f"[{task_id}] {feedback}")
+        return "\n".join(entries).strip()
 
     @staticmethod
     def _truncate(text: str, *, limit: int) -> str:
