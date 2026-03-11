@@ -606,17 +606,27 @@ class RichLiveRenderer:
 
     def _emit_multiline_submit(self, view: MultilineInputView, value: str) -> None:
         if self._emitter is not None:
-            try:
-                self._emitter.submit_multiline_input(id=view.id, mode=view.mode, value=value)
-            except Exception:
-                pass
+            # Emit asynchronously to avoid re-entrant deadlocks:
+            # key handling holds renderer lock while emitter dispatch is synchronous.
+            def _emit() -> None:
+                try:
+                    self._emitter.submit_multiline_input(id=view.id, mode=view.mode, value=value)
+                except Exception:
+                    pass
+
+            threading.Thread(target=_emit, daemon=True).start()
 
     def _emit_multiline_cancel(self, view: MultilineInputView) -> None:
         if self._emitter is not None:
-            try:
-                self._emitter.cancel_multiline_input(id=view.id, mode=view.mode)
-            except Exception:
-                pass
+            # Emit asynchronously to avoid re-entrant deadlocks:
+            # key handling holds renderer lock while emitter dispatch is synchronous.
+            def _emit() -> None:
+                try:
+                    self._emitter.cancel_multiline_input(id=view.id, mode=view.mode)
+                except Exception:
+                    pass
+
+            threading.Thread(target=_emit, daemon=True).start()
 
     def _trigger_quit(self, clean: bool = False) -> None:
         if clean:
