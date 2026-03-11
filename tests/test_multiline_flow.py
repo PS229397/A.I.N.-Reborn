@@ -177,3 +177,40 @@ def test_multiline_planning_and_approval_flow(tmp_path, monkeypatch):
 
     assert any(mode == MultilineInputMode.FEATURE_DESCRIPTION for _, mode, _ in complete_calls)
     assert any(mode == MultilineInputMode.TASK_DENIAL_FEEDBACK for _, mode, _ in complete_calls)
+
+
+def test_user_context_stage_uses_multiline_tui_flow(tmp_path, monkeypatch):
+    _configure_pipeline_paths(tmp_path, monkeypatch)
+
+    emitter = Emitter()
+    driver = MultilineTestDriver(emitter)
+    monkeypatch.setattr(pipeline, "_EMITTER", emitter)
+    monkeypatch.setattr(pipeline, "_RENDERER", StubRenderer())
+    # If this gets called, the stage regressed to the legacy inline collector path.
+    monkeypatch.setattr(
+        pipeline,
+        "_collect_multiline_input",
+        lambda _prompt: (_ for _ in ()).throw(AssertionError("Legacy inline collector should not be used")),
+    )
+
+    transitions: list[str] = []
+    monkeypatch.setattr(
+        pipeline,
+        "set_stage",
+        lambda stage, state=None: transitions.append(stage) or (state or {}),
+    )
+
+    state = {
+        "current_stage": "user_context",
+        "completed_stages": [],
+        "started_at": None,
+        "last_updated": None,
+    }
+
+    pipeline.run_user_context(state, {})
+
+    assert pipeline.USER_CONTEXT_FILE.read_text(encoding="utf-8") == FEATURE_TEXT
+    assert transitions == ["planning_questions"]
+    assert len(driver.open_events) == 1
+    assert driver.open_events[0].mode == MultilineInputMode.FEATURE_DESCRIPTION
+    assert driver.open_events[0].source_stage == "user_context"

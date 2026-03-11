@@ -19,6 +19,7 @@ _C_SECONDARY_TEXT = "#23A19F"
 _C_NEON_PINK = "bold #ff2d6f"
 _C_BORDER = "#ff2d6f"
 _C_ERROR = "bold red"
+_FEATURE_DESCRIPTION_MAX_BODY_ROWS = 10
 
 
 @dataclass
@@ -49,14 +50,14 @@ class MultilineInputView:
         mode: MultilineInputMode = MultilineInputMode.FEATURE_DESCRIPTION,
         initial_text: str | None = None,
         source_stage: str = "",
-        body_height: int = 12,
+        body_height: int = 10,
     ) -> None:
         self.id = id
         self.title = title
         self.prompt = prompt
         self.mode = mode
         self.source_stage = source_stage
-        self._body_height = max(3, body_height)
+        self._body_height = self._clamp_body_height(body_height)
         self._lines = self._coerce_lines(initial_text or "")
         self._cursor_row = len(self._lines) - 1
         self._cursor_col = len(self._lines[-1])
@@ -65,7 +66,7 @@ class MultilineInputView:
         self._ensure_cursor_visible()
 
     @classmethod
-    def from_state(cls, state: MultilineInputState, *, body_height: int = 12) -> "MultilineInputView":
+    def from_state(cls, state: MultilineInputState, *, body_height: int = 10) -> "MultilineInputView":
         """Instantiate a view from a persisted MultilineInputState."""
 
         text = state.value or state.initial_text or ""
@@ -91,7 +92,7 @@ class MultilineInputView:
         """Update the max body rows and keep the cursor in view."""
 
         if rows > 0:
-            self._body_height = max(3, rows)
+            self._body_height = self._clamp_body_height(rows)
             self._ensure_cursor_visible()
 
     def handle_key(
@@ -157,7 +158,8 @@ class MultilineInputView:
             content,
             title=self._panel_title(),
             border_style=_C_BORDER,
-            padding=(1, 2),
+            # Keep the outer frame tighter so the global keybar stays visible.
+            padding=(0, 2),
         )
 
     # ------------------------------------------------------------------ buffer ops
@@ -276,6 +278,12 @@ class MultilineInputView:
         elif self._cursor_row >= self._scroll_top + self._body_height:
             self._scroll_top = self._cursor_row - self._body_height + 1
 
+    def _clamp_body_height(self, rows: int) -> int:
+        height = max(3, rows)
+        if self.mode == MultilineInputMode.FEATURE_DESCRIPTION:
+            return min(height, _FEATURE_DESCRIPTION_MAX_BODY_ROWS)
+        return height
+
     # ------------------------------------------------------------------ rendering
 
     def _panel_title(self) -> str:
@@ -301,9 +309,15 @@ class MultilineInputView:
 
     def _visible_lines(self) -> Iterable[Text]:
         start = self._scroll_top
-        end = min(len(self._lines), start + self._body_height)
-        for row_idx in range(start, end):
+        viewport_end = start + self._body_height
+        content_end = min(len(self._lines), viewport_end)
+        for row_idx in range(start, content_end):
             yield self._render_line(row_idx)
+        for _ in range(content_end, viewport_end):
+            filler = Text()
+            filler.append("     ", style=_C_SECONDARY_TEXT)
+            filler.append("", style=_C_PRIMARY_TEXT)
+            yield filler
 
     def _render_line(self, row_idx: int) -> Text:
         line = self._lines[row_idx]
@@ -323,10 +337,7 @@ class MultilineInputView:
         table = Table.grid(padding=(0, 1))
         table.add_column(style=_C_NEON_PINK, no_wrap=True)
         table.add_column(style=_C_SECONDARY_TEXT)
-        table.add_row("Enter", "Insert newline")
-        table.add_row("Shift+Alt+Enter", "Submit")
         table.add_row("Ctrl+Enter", "Submit")
-        table.add_row("Esc", "Cancel and return")
         if self.validation_error:
             table.add_row("", f"[{_C_ERROR}]{self.validation_error}[/{_C_ERROR}]")
         return Panel(

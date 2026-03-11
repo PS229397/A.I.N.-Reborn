@@ -866,11 +866,12 @@ class RichLiveRenderer:
         state = self._state
         if state.multiline_view is not None:
             state.multiline_view.set_body_height(self._multiline_body_height())
+            multiline_size = max(5, self._console.size.height - 3 - 4 - 2)
             keybar = self._build_keybar()
             layout = Layout()
             layout.split_column(
                 Layout(self._build_status_bar(), name="status", size=3),
-                Layout(state.multiline_view.render(), name="multiline"),
+                Layout(state.multiline_view.render(), name="multiline", size=multiline_size),
                 Layout(keybar, name="keybar", size=4),
             )
             return layout
@@ -1314,7 +1315,7 @@ class RichLiveRenderer:
     def _multiline_body_height(self) -> int:
         """Estimate body rows available for the multiline overlay."""
         total = self._console.size.height
-        reserved = 3 + 4 + 6  # status + keybar + header/prompt/footer padding
+        reserved = 3 + 4 + 7  # status + keybar + header/prompt/footer padding (+1 safety)
         return max(5, total - reserved)
 
 

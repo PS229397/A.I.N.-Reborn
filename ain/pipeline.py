@@ -2468,13 +2468,12 @@ def _rerun_planning_and_task_creation(state: dict[str, Any], config: dict[str, A
 def run_user_context(state: dict, config: dict) -> None:
     banner("Stage: Feature Context")
 
-    content = _collect_multiline_input("A.I.N. - Describe the feature or bug")
+    content = _ensure_feature_description(state, source_stage="user_context")
     if not content:
+        # Defensive fallback; _ensure_feature_description exits on empty input.
         warn("No description provided. Please re-run and describe your feature.")
         sys.exit(0)
 
-    USER_CONTEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    USER_CONTEXT_FILE.write_text(content, encoding="utf-8")
     success("Feature context saved.")
     set_stage("planning_questions", state)
 
