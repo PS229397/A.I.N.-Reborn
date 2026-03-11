@@ -327,6 +327,7 @@ class RichLiveRenderer:
         version: str = "0.1.8",
         emitter: Emitter | None = None,
         on_quit: Callable[[], None] | None = None,
+        on_quit_clean: Callable[[], None] | None = None,
         on_restart: Callable[[], None] | None = None,
         on_approve: Callable[[], None] | None = None,
     ) -> None:
@@ -335,6 +336,7 @@ class RichLiveRenderer:
         self._enable_keyboard = enable_keyboard
         self._version = version
         self._on_quit = on_quit
+        self._on_quit_clean = on_quit_clean
         self._on_restart = on_restart
         self._on_approve = on_approve
         self._state = _RendererState()
@@ -511,6 +513,10 @@ class RichLiveRenderer:
                 state.quit_confirm = False
                 self._trigger_quit()
                 return
+            elif key.key in ("c", "C"):
+                state.quit_confirm = False
+                self._trigger_quit(clean=True)
+                return
             elif key.key == "\x1b" or key.key in ("n", "N"):
                 state.quit_confirm = False
                 return
@@ -612,7 +618,14 @@ class RichLiveRenderer:
             except Exception:
                 pass
 
-    def _trigger_quit(self) -> None:
+    def _trigger_quit(self, clean: bool = False) -> None:
+        if clean:
+            if self._on_quit_clean is not None:
+                self._on_quit_clean()
+                return
+            if self._on_quit is not None:
+                self._on_quit()
+            return
         if self._on_quit is not None:
             self._on_quit()
 
@@ -681,6 +694,8 @@ class RichLiveRenderer:
             state.run_status = "running"
             state.mode = event.mode
             state.started_at = time.monotonic()
+            # Clear prior completion timestamp so elapsed time tracks the new run.
+            state.ended_at = None
             state.awaiting_approval = False
             state.deck_scroll_offset = 0
             state.data_scroll_offset = 0
@@ -991,7 +1006,9 @@ class RichLiveRenderer:
         if state.quit_confirm:
             bar.append("  ⚠  JACK OUT? ", style=_C_NEON_CYAN)
             bar.append(" Y ", style="bold #2EDCD1")
-            bar.append(" confirm  ", style=_C_NEON_CYAN)
+            bar.append(" quit  ", style=_C_NEON_CYAN)
+            bar.append(" C ", style="bold #2EDCD1")
+            bar.append(" quit+clean  ", style=_C_NEON_CYAN)
             bar.append(" ESC ", style="bold #2EDCD1")
             bar.append(" abort", style=_C_NEON_CYAN)
             return Panel(bar, border_style=_C_BORDER, padding=(0, 1))

@@ -24,6 +24,7 @@ Usage (drop-in):
 from __future__ import annotations
 
 import argparse
+import _thread
 import copy
 import json
 import os
@@ -4744,6 +4745,7 @@ def _run_with_tui(
 
     exit_code: int | None = None
     persistent_error: str | None = None
+    should_clean_on_exit = False
     try:
         from ain.tui import RichRenderer
         from ain.runtime.emitter import Emitter
@@ -4755,8 +4757,17 @@ def _run_with_tui(
             _run_pipeline_compat(start_stage=start_stage, single_stage=single_stage, mode="plain")
             return
 
+        def _request_quit(*, clean: bool = False) -> None:
+            nonlocal should_clean_on_exit
+            should_clean_on_exit = should_clean_on_exit or clean
+            _thread.interrupt_main()
+
         emitter  = Emitter()
-        renderer = RichRenderer(version=_ver)
+        renderer = RichRenderer(
+            version=_ver,
+            on_quit=lambda: _request_quit(clean=False),
+            on_quit_clean=lambda: _request_quit(clean=True),
+        )
         renderer.subscribe(emitter)
         renderer.start()
         try:
@@ -4777,18 +4788,20 @@ def _run_with_tui(
                         break
 
                     choice = renderer.request_input(
-                        "SUCCESS: pipeline completed. [N] new AIN session, [Q] quit"
+                        "SUCCESS: pipeline completed. [N] new AIN session, [Q] quit, [C] quit + clean"
                     ).strip().lower()
-                    clean_workspace(silent=True)
                     if hasattr(renderer, "reset_state"):
                         renderer.reset_state()
                     if choice == "n":
+                        clean_workspace(silent=True)
                         save_state(_default_state(load_config()))
                         if PLANNING_APPROVED_FLAG.exists():
                             PLANNING_APPROVED_FLAG.unlink()
                         next_start_stage = None
                         next_single_stage = False
                         continue
+                    if choice == "c":
+                        should_clean_on_exit = True
                     break
             except SystemExit as exc:
                 exit_code = exc.code if isinstance(exc.code, int) else 1
@@ -4804,6 +4817,8 @@ def _run_with_tui(
 
         if persistent_error:
             print(f"{C.RED}  X{C.RESET} {persistent_error}", file=sys.stderr)
+        if should_clean_on_exit:
+            clean_workspace()
         if exit_code is not None:
             raise SystemExit(exit_code)
 
