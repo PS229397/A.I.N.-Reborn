@@ -13,7 +13,7 @@ NAV_CANDIDATES = [
     DOCS_DIR / "_navbar.md",
     DOCS_DIR / "SUMMARY.md",
 ]
-EXPECTED_CONTENT = "# Hello World"
+EXPECTED_CONTENT = "# test"
 
 
 def test_docs_test_md_matches_sentinel_spec():
@@ -23,7 +23,7 @@ def test_docs_test_md_matches_sentinel_spec():
     lines = content.splitlines()
 
     assert len(lines) == 1, "docs/test.md must contain exactly one line"
-    assert lines[0] == EXPECTED_CONTENT, "docs/test.md must contain only the single heading '# Hello World'"
+    assert lines[0] == EXPECTED_CONTENT, "docs/test.md must contain only the single heading '# test'"
     assert content in {EXPECTED_CONTENT, f"{EXPECTED_CONTENT}\n"}, "docs/test.md must not include additional content or whitespace"
 
 
