@@ -954,11 +954,12 @@ class RichLiveRenderer:
     def _build_layout(self) -> Layout:
         state = self._state
         if state.mode_select_view is not None:
+            mode_select_size = max(5, self._console.size.height - 3 - 4 - 2)
             keybar = self._build_keybar()
             layout = Layout()
             layout.split_column(
                 Layout(self._build_status_bar(), name="status", size=3),
-                Layout(state.mode_select_view.render(), name="mode_select"),
+                Layout(state.mode_select_view.render(), name="mode_select", size=mode_select_size),
                 Layout(keybar, name="keybar", size=4),
             )
             return layout
@@ -1437,5 +1438,3 @@ def _short_ts(ts: str) -> str:
         return parsed.astimezone().strftime("%H:%M:%S")
     except Exception:
         return ts[11:19] if len(ts) >= 19 else ts
-
-

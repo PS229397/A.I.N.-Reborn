@@ -81,12 +81,11 @@ class ModeSelectView:
             body.append(f"{label} [{key}]{current_marker}\n", style=text_style)
             if summary:
                 body.append(f"  {summary}\n", style=_C_SECONDARY_TEXT)
-        body.append("\nUP/DOWN navigate  ENTER select  Q keep current", style=_C_SECONDARY_TEXT)
+        body.append("\n  ↑/↓ navigate  ENTER select", style=_C_SECONDARY_TEXT)
 
         footer_table = Table.grid(padding=(0, 1))
         footer_table.add_column(style=_C_NEON_PINK, no_wrap=True)
         footer_table.add_column(style=_C_SECONDARY_TEXT)
-        footer_table.add_row("M", "cycle mode during run")
 
         return Panel(
             Group(body, footer_table),
