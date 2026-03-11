@@ -102,23 +102,23 @@ class ModeSelectView:
             text_style = _C_NEON_PINK if is_selected else _C_PRIMARY_TEXT
             body.append(f"{marker} ", style=marker_style)
             body.append(f"{base['label']} [{base['base_key']}]\n", style=text_style)
-            # compact model line for currently selected tier
-            tier_idx = self._tier_idx.get(base["base_key"], 0)
-            model_line = base["tiers"][tier_idx].get("model_line")
-            if model_line:
-                body.append(f"  {model_line}\n", style=_C_SECONDARY_TEXT)
-            if base.get("summary"):
-                body.append(f"  {base['summary']}\n", style=_C_SECONDARY_TEXT)
+            if is_selected:
+                tier_idx = self._tier_idx.get(base["base_key"], 0)
+                model_line = base["tiers"][tier_idx].get("model_line")
+                if model_line:
+                    body.append(f"  {model_line}\n", style=_C_SECONDARY_TEXT)
+                if base.get("summary"):
+                    body.append(f"  {base['summary']}\n", style=_C_SECONDARY_TEXT)
 
-            if is_selected and self._tier_select_active and len(base["tiers"]) > 1:
-                body.append("  ", style=_C_SECONDARY_TEXT)
-                for t_idx, tier in enumerate(base["tiers"]):
-                    selected = t_idx == tier_idx
-                    open_b = "[" if selected else " "
-                    close_b = "]" if selected else " "
-                    tier_style = _C_NEON_PINK if selected else _C_SECONDARY_TEXT
-                    body.append(f"{open_b}{tier['tier']}{close_b} ", style=tier_style)
-                body.append("\n", style=_C_SECONDARY_TEXT)
+                if self._tier_select_active and len(base["tiers"]) > 1:
+                    body.append("  ", style=_C_SECONDARY_TEXT)
+                    for t_idx, tier in enumerate(base["tiers"]):
+                        selected = t_idx == tier_idx
+                        open_b = "[" if selected else " "
+                        close_b = "]" if selected else " "
+                        tier_style = _C_NEON_PINK if selected else _C_SECONDARY_TEXT
+                        body.append(f"{open_b}{tier['tier']}{close_b} ", style=tier_style)
+                    body.append("\n", style=_C_SECONDARY_TEXT)
         body.append("\n  ↑/↓ workflow  ENTER open/confirm  ←/→ tier  ESC back", style=_C_SECONDARY_TEXT)
 
         footer_table = Table.grid(padding=(0, 1))

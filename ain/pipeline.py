@@ -1208,9 +1208,13 @@ def _build_mode_model_lines(mode: str, config: dict[str, Any]) -> list[str]:
         agent = agents.get(agent_key)
         if not agent:
             return None
-        cmd = agent.get("command", "").capitalize() or agent_key
+        cmd = agent.get("command", "").lower() or agent_key
         model = agent.get("model", "unknown model")
-        return f"{cmd} {model}"
+        model_lower = model.lower()
+        # If model already carries the command prefix, drop the extra command tag.
+        if model_lower.startswith(f"{cmd}-") or model_lower == cmd:
+            return model
+        return f"{cmd}-{model}"
 
     scan = _fmt(stage_map.get("architecture"))
     plan = _fmt(stage_map.get("planning_generation"))
@@ -1221,21 +1225,21 @@ def _build_mode_model_lines(mode: str, config: dict[str, Any]) -> list[str]:
     agent_set = {k for k in [scan, plan, tasks, impl] if k}
     if len(agent_set) == 1:
         only = agent_set.pop()
-        return [f"{only} (scan / plan / tasks / impl)"]
+        return [f"//scan+plan+tasks+impl {only}"]
 
     parts: list[str] = []
     if scan:
-        parts.append(f"{scan} (scan)")
+        parts.append(f"//scan {scan}")
     # Merge plan/tasks when identical
     if plan and tasks and plan == tasks:
-        parts.append(f"{plan} (plan + tasks)")
+        parts.append(f"//plan+tasks {plan}")
     else:
         if plan:
-            parts.append(f"{plan} (plan)")
+            parts.append(f"//plan {plan}")
         if tasks:
-            parts.append(f"{tasks} (tasks)")
+            parts.append(f"//tasks {tasks}")
     if impl:
-        parts.append(f"{impl} (impl)")
+        parts.append(f"//impl {impl}")
 
     return ["  ".join(parts)]
 
