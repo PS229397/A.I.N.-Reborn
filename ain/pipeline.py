@@ -177,31 +177,104 @@ DESIGN_HEADINGS = [
 ]
 
 PIPELINE_MODES: dict[str, dict[str, Any]] = {
-    "default": {
-        "label": "Default",
-        "summary": "Gemini -> Codex -> Chief -> Claude",
+    "default_lite": {
+        "label": "Default (Lite)",
+        "summary": "Gemini scan → GPT-5.1 Codex planning/task creation → Claude Sonnet 4.5 implementation",
         "stages": {
-            "planning_generation": "planning",
-            "task_creation": "task_creation",
-            "implementation": "implementation",
+            "architecture": "scan_gemini",
+            "planning_generation": "codex_lite",
+            "task_creation": "codex_lite",
+            "implementation": "claude_lite",
         },
     },
-    "codex_only": {
-        "label": "Codex Only",
-        "summary": "Gemini -> Codex -> Codex -> Codex",
+    "default_balanced": {
+        "label": "Default (Balanced)",
+        "summary": "Gemini scan → GPT-5.2 Codex planning/task creation → Claude Sonnet 4.6 implementation",
         "stages": {
-            "planning_generation": "planning_codex",
-            "task_creation": "task_creation_codex",
-            "implementation": "implementation_codex",
+            "architecture": "scan_gemini",
+            "planning_generation": "codex_balanced",
+            "task_creation": "codex_balanced",
+            "implementation": "claude_balanced",
         },
     },
-    "claude_chief_only": {
-        "label": "Claude/Chief Only",
-        "summary": "Gemini -> Chief -> Chief -> Claude",
+    "default_max": {
+        "label": "Default (Max)",
+        "summary": "Gemini scan → GPT-5.3 Codex planning/task creation → Claude Opus 4.6 implementation",
         "stages": {
-            "planning_generation": "planning_chief",
-            "task_creation": "task_creation",
-            "implementation": "implementation",
+            "architecture": "scan_gemini",
+            "planning_generation": "codex_max",
+            "task_creation": "codex_max",
+            "implementation": "claude_max",
+        },
+    },
+    "codex_only_lite": {
+        "label": "Codex Only (Lite)",
+        "summary": "Gemini scan → GPT-5.1 Codex handles planning, tasks, and implementation",
+        "stages": {
+            "architecture": "scan_gemini",
+            "planning_generation": "codex_lite",
+            "task_creation": "codex_lite",
+            "implementation": "codex_lite",
+        },
+    },
+    "codex_only_balanced": {
+        "label": "Codex Only (Balanced)",
+        "summary": "Gemini scan → GPT-5.2 Codex handles planning, tasks, and implementation",
+        "stages": {
+            "architecture": "scan_gemini",
+            "planning_generation": "codex_balanced",
+            "task_creation": "codex_balanced",
+            "implementation": "codex_balanced",
+        },
+    },
+    "codex_only_max": {
+        "label": "Codex Only (Max)",
+        "summary": "Gemini scan → GPT-5.3 Codex max handles planning, tasks, and implementation",
+        "stages": {
+            "architecture": "scan_gemini",
+            "planning_generation": "codex_max",
+            "task_creation": "codex_max",
+            "implementation": "codex_max",
+        },
+    },
+    "claude_only_lite": {
+        "label": "Claude Only (Lite)",
+        "summary": "Gemini scan → Claude Sonnet 4.6 handles planning, tasks, and implementation",
+        "stages": {
+            "architecture": "scan_gemini",
+            "planning_generation": "claude_lite",
+            "task_creation": "claude_lite",
+            "implementation": "claude_lite",
+        },
+    },
+    "claude_only_balanced": {
+        "label": "Claude Only (Balanced)",
+        "summary": "Gemini scan → Claude Opus 4.5 handles planning, tasks, and implementation",
+        "stages": {
+            "architecture": "scan_gemini",
+            "planning_generation": "claude_balanced",
+            "task_creation": "claude_balanced",
+            "implementation": "claude_balanced",
+        },
+    },
+    "claude_only_max": {
+        "label": "Claude Only (Max)",
+        "summary": "Gemini scan → Claude Opus 4.6 handles planning, tasks, and implementation",
+        "stages": {
+            "architecture": "scan_gemini",
+            "planning_generation": "claude_max",
+            "task_creation": "claude_max",
+            "implementation": "claude_max",
+        },
+    },
+    "gemini_only": {
+        "label": "Gemini Only",
+        "summary": "Gemini 3.1 Flash Lite handles every stage (scan, planning, and implementation)",
+        "stages": {
+            "architecture": "gemini_only",
+            "planning_generation": "gemini_only",
+            "task_creation": "gemini_only",
+            "implementation": "gemini_only",
         },
     },
 }
@@ -212,57 +285,99 @@ PIPELINE_MODES: dict[str, dict[str, Any]] = {
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "agents": {
-        "architecture": {
-            "command": "gemini", "args": [], "model": "gemini-2.5-flash",
-            "description": "Gemini for architecture analysis",
+        "scan_gemini": {
+            "command": "gemini",
+            "args": [],
+            "model": "gemini-3.1-flash-lite",
+            "description": "Gemini 3.1 Flash Lite for scanning and architecture analysis",
+            "skills": [
+                "codebase analysis",
+                "system architecture reasoning",
+            ],
         },
-        "planning": {
-            "command": "codex", "args": [], "model": "gpt-5.1",
-            "prompt_mode": "arg",
-            "description": "Codex for planning and specification",
-        },
-        "planning_codex": {
-            "command": "codex", "args": [], "model": "gpt-5.1",
-            "prompt_mode": "arg",
-            "description": "Codex for planning generation in codex_only mode",
-        },
-        "planning_chief": {
-            "command": "chief", "args": [], "model": "claude-opus-4.1",
-            "description": "Chief for planning generation in claude_chief_only mode",
-        },
-        "task_creation": {
-            "command": "chief", "args": [], "model": "claude-sonnet-4-20250514",
-            "description": "Chief task orchestration engine  auto-installed by ain init",
-        },
-        "task_creation_codex": {
-            "command": "codex", "args": ["exec"], "model": "gpt-5-codex",
+        "codex_lite": {
+            "command": "codex",
+            "args": [],
+            "model": "gpt-5.1-codex",
             "prompt_mode": "stdin",
-            "description": "Codex for task creation in codex_only mode",
+            "description": "GPT-5.1 Codex for planning, brainstorming, and task creation",
+            "skills": ["software planning", "task decomposition", "multi-step reasoning"],
         },
-        "implementation": {
+        "codex_balanced": {
+            "command": "codex",
+            "args": [],
+            "model": "gpt-5.2-codex",
+            "prompt_mode": "stdin",
+            "description": "GPT-5.2 Codex for planning and implementation with extra scale",
+            "skills": ["software planning", "tool orchestration", "code synthesis"],
+        },
+        "codex_max": {
+            "command": "codex",
+            "args": [],
+            "model": "gpt-5.3-codex-max",
+            "prompt_mode": "stdin",
+            "description": "GPT-5.3 Codex Max for long-context planning and code generation",
+            "skills": ["autonomous planning", "deep code synthesis", "extended context reasoning"],
+        },
+        "claude_lite": {
             "command": "claude",
             "args": ["--allowedTools", "Edit,Write,Bash,Read,Glob,Grep"],
             "model": "claude-sonnet-4-20250514",
-            "description": "Claude Code for implementation with file access",
+            "description": "Claude Sonnet 4.5 for implementation with multi-file editing",
+            "skills": ["software implementation", "code refactoring", "debugging"],
         },
-        "implementation_codex": {
+        "claude_balanced": {
+            "command": "claude",
+            "args": ["--allowedTools", "Edit,Write,Bash,Read,Glob,Grep"],
+            "model": "claude-sonnet-4-20260115",
+            "description": "Claude Sonnet 4.6 for adaptive implementation with broader reasoning",
+            "skills": ["implementation", "architectural reasoning", "automation"],
+        },
+        "claude_max": {
+            "command": "claude",
+            "args": ["--allowedTools", "Edit,Write,Bash,Read,Glob,Grep"],
+            "model": "claude-opus-4.6",
+            "description": "Claude Opus 4.6 for maximum context implementation",
+            "skills": ["long-context coding", "team orchestration", "execution supervision"],
+        },
+        "gemini_only": {
+            "command": "gemini",
+            "args": [],
+            "model": "gemini-3.1-flash-lite",
+            "description": "Gemini 3.1 Flash Lite for every stage (free-tier safe)",
+            "skills": ["end-to-end planning", "code generation", "architecture reasoning"],
+        },
+        "task_creation_codex": {
             "command": "codex",
             "args": ["exec"],
-            "model": "gpt-5.1-codex-max",
+            "model": "gpt-5.3-codex-max",
             "prompt_mode": "stdin",
-            "description": "Codex for implementation in codex_only mode",
+            "description": "Codex Max fallback for task creation",
+            "skills": ["task generation", "planning feedback"],
         },
         "implementation_fallback": {
             "command": "codex",
             "args": ["--approval-mode", "full-auto"],
-            "model": "gpt-5.1-codex-max",
+            "model": "gpt-5.3-codex-max",
             "prompt_mode": "arg",
-            "description": "Codex fallback when default implementation hits token limits",
+            "description": "Codex fallback for implementation when other agents exceed limits.",
+            "skills": ["code recovery", "autonomous implementation"],
         },
     },
     "pipeline_mode": {
-        "default": "default",
-        "available": ["default", "codex_only", "claude_chief_only"],
+        "default": "default_balanced",
+        "available": [
+            "default_lite",
+            "default_balanced",
+            "default_max",
+            "codex_only_lite",
+            "codex_only_balanced",
+            "codex_only_max",
+            "claude_only_lite",
+            "claude_only_balanced",
+            "claude_only_max",
+            "gemini_only",
+        ],
     },
     "validation": {"auto_detect": True, "commands": []},
     "git": {"auto_branch": True, "auto_commit": False, "branch_prefix": "ai/feature"},
@@ -1026,12 +1141,19 @@ def _show_version(short: bool = False) -> None:
 
 
 def get_available_pipeline_modes(config: dict[str, Any]) -> list[str]:
-    configured = (
-        ((config.get("pipeline_mode") or {}).get("available"))
-        or list(PIPELINE_MODES.keys())
-    )
-    available = [mode for mode in configured if mode in PIPELINE_MODES]
-    return available or ["default"]
+    configured = (config.get("pipeline_mode") or {}).get("available") or []
+    normalized = [_normalize_mode_key(m) for m in configured if m]
+    available = [m for m in normalized if m in PIPELINE_MODES]
+
+    # If nothing valid was configured, start with all known modes.
+    if not available:
+        available = list(PIPELINE_MODES.keys())
+
+    # Append any missing modes so new additions (e.g., gemini_only) always show up.
+    for mode in PIPELINE_MODES.keys():
+        if mode not in available:
+            available.append(mode)
+    return available
 
 
 def get_selected_mode(
@@ -1041,25 +1163,81 @@ def get_selected_mode(
     emit_warning: bool = True,
 ) -> str:
     available = get_available_pipeline_modes(config)
-    selected = (
-        state.get("selected_mode")
-        or ((config.get("pipeline_mode") or {}).get("default"))
-        or "default"
+    default_mode = (
+        (config.get("pipeline_mode") or {}).get("default")
+        or (available[0] if available else "default_balanced")
     )
+    selected = _normalize_mode_key(state.get("selected_mode") or default_mode)
     if selected not in PIPELINE_MODES or selected not in available:
         if emit_warning:
-            warn(f"Invalid stored pipeline mode '{selected}'. Falling back to default.")
-        return "default"
+            warn(f"Invalid stored pipeline mode '{selected}'. Falling back to {default_mode}.")
+        if default_mode in PIPELINE_MODES and default_mode in available:
+            return default_mode
+        return available[0] if available else default_mode
     return selected
 
 
-def get_mode_details(mode: str) -> dict[str, str]:
+def get_mode_details(mode: str, config: dict[str, Any]) -> dict[str, Any]:
+    mode = _normalize_mode_key(mode)
     meta = PIPELINE_MODES[mode]
     return {
         "key": mode,
         "label": meta["label"],
         "summary": meta["summary"],
+        "model_lines": _build_mode_model_lines(mode, config),
     }
+
+def _normalize_mode_key(mode: str | None) -> str:
+    if not mode:
+        return "default_balanced"
+    aliases = {
+        "default": "default_balanced",
+        "codex_only": "codex_only_balanced",
+        "claude_chief_only": "claude_only_balanced",
+    }
+    return aliases.get(mode, mode)
+
+
+def _build_mode_model_lines(mode: str, config: dict[str, Any]) -> list[str]:
+    agents = config.get("agents", {})
+    stage_map = PIPELINE_MODES[mode]["stages"]
+
+    def _fmt(agent_key: str | None) -> str | None:
+        if not agent_key:
+            return None
+        agent = agents.get(agent_key)
+        if not agent:
+            return None
+        cmd = agent.get("command", "").capitalize() or agent_key
+        model = agent.get("model", "unknown model")
+        return f"{cmd} {model}"
+
+    scan = _fmt(stage_map.get("architecture"))
+    plan = _fmt(stage_map.get("planning_generation"))
+    tasks = _fmt(stage_map.get("task_creation"))
+    impl = _fmt(stage_map.get("implementation"))
+
+    # If everything is the same agent, collapse to one line.
+    agent_set = {k for k in [scan, plan, tasks, impl] if k}
+    if len(agent_set) == 1:
+        only = agent_set.pop()
+        return [f"{only} (scan / plan / tasks / impl)"]
+
+    parts: list[str] = []
+    if scan:
+        parts.append(f"{scan} (scan)")
+    # Merge plan/tasks when identical
+    if plan and tasks and plan == tasks:
+        parts.append(f"{plan} (plan + tasks)")
+    else:
+        if plan:
+            parts.append(f"{plan} (plan)")
+        if tasks:
+            parts.append(f"{tasks} (tasks)")
+    if impl:
+        parts.append(f"{impl} (impl)")
+
+    return ["  ".join(parts)]
 
 
 def resolve_stage_agent_key(stage_name: str, state: dict[str, Any], config: dict[str, Any]) -> str:
@@ -1092,7 +1270,7 @@ def set_pipeline_mode(mode: str, state: dict[str, Any], config: dict[str, Any]) 
     config["pipeline_mode"]["default"] = mode
     save_state(state)
     save_config(config)
-    details = get_mode_details(mode)
+    details = get_mode_details(mode, config)
     if current_stage in {"scanning", "architecture", "planning_generation", "task_creation", "implementation", "validation"}:
         info(
             f"Pipeline mode changed to {details['label']} ({details['summary']}). "
@@ -1109,10 +1287,10 @@ def cycle_pipeline_mode(state: dict[str, Any], config: dict[str, Any]) -> dict[s
     next_mode = available[(idx + 1) % len(available)]
     try:
         set_pipeline_mode(next_mode, state, config)
-        return get_mode_details(next_mode)
+        return get_mode_details(next_mode, config)
     except RuntimeError as exc:
         warn(str(exc))
-        return get_mode_details(current)
+        return get_mode_details(current, config)
 
 
 def prompt_for_pipeline_mode(state: dict[str, Any], config: dict[str, Any]) -> str:
@@ -1123,7 +1301,7 @@ def prompt_for_pipeline_mode(state: dict[str, Any], config: dict[str, Any]) -> s
         print()
         print("  Select pipeline mode:")
         for index, mode in enumerate(available, start=1):
-            details = get_mode_details(mode)
+            details = get_mode_details(mode, config)
             marker = " (current)" if mode == current else ""
             print(f"    {index}. {details['label']} [{mode}] - {details['summary']}{marker}")
         print(f"  Press Enter to keep {current}.")
@@ -1156,7 +1334,7 @@ def prompt_for_pipeline_mode(state: dict[str, Any], config: dict[str, Any]) -> s
         body = Text()
         body.append("Select Pipeline Mode\n\n", style=f"bold {rich_cyan}")
         for idx, mode in enumerate(available):
-            details = get_mode_details(mode)
+            details = get_mode_details(mode, config)
             cursor = "► " if idx == selected else "  "
             cursor_style = f"bold {rich_pink}" if idx == selected else rich_dim
             line_style = f"bold {rich_pink}" if idx == selected else rich_cyan
@@ -1636,7 +1814,8 @@ def run_architecture(state: dict, config: dict) -> None:
     )
     (LOGS_DIR / "architecture_last_prompt.txt").write_text(prompt_instructions, encoding="utf-8")
 
-    agent_cfg  = config["agents"].get("architecture", {})
+    agent_key  = resolve_stage_agent_key("architecture", state, config)
+    agent_cfg  = config["agents"].get(agent_key, {})
     command    = agent_cfg.get("command", "gemini")
     resolved   = shutil.which(command) or command
     extra_args = agent_cfg.get("args", [])
@@ -1655,7 +1834,7 @@ def run_architecture(state: dict, config: dict) -> None:
 
     rc, gemini_output = _run_agent_background(
         [resolved] + extra_args,
-        agent_name=_agent_display_name("architecture", config),
+        agent_name=_agent_display_name(agent_key, config),
         log_slug="architecture",
         input_text=full_prompt,  # embed context directly  .ai-pipeline/ may be gitignored
     )
@@ -2601,36 +2780,6 @@ def _planning_direct_write_prompt() -> str:
     )
 
 
-def _write_chief_planning_package(prompt: str) -> None:
-    CHIEF_PRDS_DIR.mkdir(parents=True, exist_ok=True)
-    prd_md = (
-        "# Planning Generation Context\n\n"
-        "Create the planning package for this feature.\n\n"
-        "- Write `docs/PRD.md`\n"
-        "- Write `docs/DESIGN.md`\n"
-        "- Write `docs/FEATURE_SPEC.md`\n\n"
-        "Write the files directly to disk. Do NOT output file markers or print the file contents.\n\n"
-        "---\n\n"
-        f"{prompt}\n\n---\n\n{_planning_direct_write_prompt()}\n"
-    )
-    CHIEF_PRD_MD.write_text(prd_md, encoding="utf-8")
-    CHIEF_PRD_FILE.write_text(
-        json.dumps(
-            {
-                "project": REPO_ROOT.name,
-                "description": "Generate PRD, DESIGN, and FEATURE_SPEC planning docs.",
-                "userStories": [
-                    {"id": "PLAN-001", "title": "Create docs/PRD.md", "passes": False, "inProgress": False},
-                    {"id": "PLAN-002", "title": "Create docs/DESIGN.md", "passes": False, "inProgress": False},
-                    {"id": "PLAN-003", "title": "Create docs/FEATURE_SPEC.md", "passes": False, "inProgress": False},
-                ],
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
-
 def _clear_plan_docs() -> list[Path]:
     plan_docs = [PRD_FILE, DESIGN_FILE, FEATURE_SPEC_FILE]
     for doc in plan_docs:
@@ -2700,14 +2849,6 @@ def _run_planning_in_background(agent_key: str, prompt: str, config: dict[str, A
         doc.exists() and doc.stat().st_size > 0
         for doc in [PRD_FILE, DESIGN_FILE, FEATURE_SPEC_FILE]
     )
-
-
-def _run_planning_with_chief(prompt: str, config: dict[str, Any]) -> bool:
-    _write_chief_planning_package(prompt)
-    plan_docs = _clear_plan_docs()
-    cmd = _resolve_agent_command("planning_chief", config) + ["--no-retry", "main"]
-    info("Suspending TUI  running Chief for planning generation ...")
-    return _run_suspended_agent(cmd, "Planning Generation (Chief)", plan_docs)
 
 
 def _run_planning_fallback_claude(prompt: str) -> None:
@@ -2903,19 +3044,31 @@ def run_planning_generation(state: dict, config: dict) -> None:
     planning_prompt = f"{prompt}\n\n---\n\n{_planning_direct_write_prompt()}"
     _clear_plan_docs()
 
+    agent_cfg = config.get("agents", {}).get(agent_key, {})
+    command_name = str(agent_cfg.get("command", agent_key)).lower()
+
     planning_ok = False
-    if mode in ("default", "codex_only"):
+    if "codex" in command_name:
         planning_ok = _run_planning_in_background(agent_key, planning_prompt, config)
+    else:
+        resolved_cmd = _resolve_agent_command(agent_key, config)
+        rc, output = _run_agent_background(
+            resolved_cmd,
+            agent_name=f"{_agent_display_name(agent_key, config)} - planning",
+            log_slug="planning_generation",
+            input_text=planning_prompt,
+        )
+        if rc == 0 and output.strip():
+            _parse_and_write_planning_docs(output)
+            planning_ok = all(
+                doc.exists() and doc.stat().st_size > 0
+                for doc in [PRD_FILE, DESIGN_FILE, FEATURE_SPEC_FILE]
+            )
         if not planning_ok:
             warn("Primary planning agent did not write all planning docs. Falling back to claude --print ...")
-            _run_planning_fallback_claude(prompt)
-    elif mode == "claude_chief_only":
-        planning_ok = _run_planning_with_chief(prompt, config)
-        if not planning_ok:
-            warn("Chief did not write all planning docs. Falling back to claude --print ...")
-            _run_planning_fallback_claude(prompt)
-    else:
-        raise RuntimeError(f"Unsupported planning mode '{mode}'.")
+
+    if not planning_ok:
+        _run_planning_fallback_claude(prompt)
 
     #  Write stubs for any still-missing files 
     for doc, headings, name in [
@@ -2999,74 +3152,8 @@ def _parse_and_write_planning_docs(output: str) -> None:
             FEATURE_SPEC_FILE.write_text("# Feature Specification\n\n", encoding="utf-8")
 
 # 
-# Stage 5: Task Creation (Chief)
+# Stage 5: Task Creation
 # 
-
-CHIEF_DIR      = REPO_ROOT / ".chief"
-CHIEF_PRDS_DIR = CHIEF_DIR / "prds" / "main"
-CHIEF_PRD_FILE = CHIEF_PRDS_DIR / "prd.json"
-CHIEF_PRD_MD   = CHIEF_PRDS_DIR / "prd.md"
-
-
-def _write_chief_prd(prompt: str) -> None:
-    """Write .chief/prds/main/prd.json and prd.md from the task-creation prompt."""
-    CHIEF_PRDS_DIR.mkdir(parents=True, exist_ok=True)
-
-    prd_md = (
-        "# Task Creation Context\n\n"
-        "Read the planning documents below and produce two files:\n\n"
-        "- Write `docs/TASKS.md`  a dependency-ordered markdown checkbox task list\n"
-        "- Write `docs/TASK_GRAPH.json`  a JSON dependency graph\n\n"
-        "Write the files directly to disk using your file-editing tools.\n"
-        "Do NOT output file markers or print the content to stdout.\n\n"
-        "---\n\n"
-        + prompt
-    )
-    CHIEF_PRD_MD.write_text(prd_md, encoding="utf-8")
-
-    prd = {
-        "project": REPO_ROOT.name,
-        "description": (
-            "Analyse the planning documents in prd.md and produce "
-            "docs/TASKS.md and docs/TASK_GRAPH.json."
-        ),
-        "userStories": [
-            {
-                "id": "US-001",
-                "title": "Create docs/TASKS.md",
-                "description": (
-                    "As a developer, I need docs/TASKS.md containing a "
-                    "dependency-ordered markdown checkbox task list."
-                ),
-                "acceptanceCriteria": [
-                    "File docs/TASKS.md exists",
-                    "File contains at least one checkbox task in '- [ ] ...' format",
-                ],
-                "priority": 1,
-                "passes": False,
-                "inProgress": False,
-            },
-            {
-                "id": "US-002",
-                "title": "Create docs/TASK_GRAPH.json",
-                "description": (
-                    "As a developer, I need docs/TASK_GRAPH.json containing "
-                    "valid JSON with id, description, depends_on, status, "
-                    "files_affected, and completed_at for every task."
-                ),
-                "acceptanceCriteria": [
-                    "File docs/TASK_GRAPH.json exists",
-                    "File contains valid JSON with a 'tasks' array",
-                ],
-                "priority": 2,
-                "passes": False,
-                "inProgress": False,
-            },
-        ],
-    }
-    CHIEF_PRD_FILE.write_text(json.dumps(prd, indent=2), encoding="utf-8")
-    success(f"Written  {CHIEF_PRD_FILE.relative_to(REPO_ROOT)}")
-    success(f"Written  {CHIEF_PRD_MD.relative_to(REPO_ROOT)}")
 
 
 def _build_task_graph_from_tasks_md() -> None:
@@ -3091,33 +3178,6 @@ def _build_task_graph_from_tasks_md() -> None:
         "completed": sum(1 for t in tasks if t["status"] == "completed"),
     }
     TASK_GRAPH_FILE.write_text(json.dumps(graph, indent=2), encoding="utf-8")
-
-
-def _run_chief_background(config: dict) -> tuple[bool, str]:
-    """Run chief non-interactively in the background, streaming output to AGENT.OUTPUT.
-
-    Returns (success, captured_output).
-    """
-    agent_cfg  = config.get("agents", {}).get("task_creation", {})
-    command    = agent_cfg.get("command", "chief")
-    extra_args = agent_cfg.get("args", [])
-
-    resolved = shutil.which(command)
-    if not resolved:
-        warn(f"chief not found on PATH. Falling back to Codex.")
-        return False, ""
-
-    cmd = [resolved] + extra_args + ["--no-retry", "main"]
-    info("Running chief in background (output in AGENT.OUTPUT panel) ...")
-    rc, output = _run_agent_background(
-        cmd,
-        agent_name=_agent_display_name("task_creation", config),
-        log_slug="task_creation",
-    )
-    if rc != 0:
-        warn(f"chief exited with code {rc}.")
-        return False, output
-    return True, output
 
 
 def _call_agent_live(agent_name: str, prompt: str, config: dict, *, log_slug: str) -> str:
@@ -3159,25 +3219,6 @@ def _call_agent_live(agent_name: str, prompt: str, config: dict, *, log_slug: st
     return output
 
 
-def _persist_stage_fallback(
-    stage_name: str,
-    state: dict[str, Any],
-    config: dict[str, Any],
-    *,
-    command: str = "codex",
-    args: list[str] | None = None,
-    prompt_mode: str = "stdin",
-) -> None:
-    state.setdefault("fallback_mode", {})
-    state["fallback_mode"][stage_name] = command
-    config.setdefault("agents", {}).setdefault(stage_name, {})
-    config["agents"][stage_name]["command"] = command
-    config["agents"][stage_name]["args"] = args or ["exec"]
-    config["agents"][stage_name]["prompt_mode"] = prompt_mode
-    save_state(state)
-    save_config(config)
-
-
 def run_task_creation(state: dict, config: dict) -> None:
     mode = get_selected_mode(state, config)
     agent_key = resolve_stage_agent_key("task_creation", state, config)
@@ -3202,124 +3243,31 @@ def run_task_creation(state: dict, config: dict) -> None:
     prompt = build_prompt(prompt_file, *ctx_files)
     live_task_output = _EMITTER is not None
 
-    if mode == "codex_only":
-        output = (
-            _call_agent_live(agent_key, prompt, config, log_slug="task_creation")
+    call = (
+        lambda: _call_agent_live(agent_key, prompt, config, log_slug="task_creation")
+        if live_task_output
+        else call_agent(agent_key, prompt, config)
+    )
+    output = call()
+    if not output.strip():
+        raise RuntimeError("Task creation agent returned empty output.")
+
+    _parse_and_write_task_artifacts(output)
+    if not TASKS_FILE.exists():
+        TASKS_FILE.write_text(output, encoding="utf-8")
+
+    if not validate_tasks_file(TASKS_FILE):
+        warn("Primary task creation agent did not produce a valid TASKS.md. Falling back to Codex Max ...")
+        fallback = (
+            _call_agent_live("task_creation_codex", prompt, config, log_slug="task_creation_fallback")
             if live_task_output
-            else call_agent(agent_key, prompt, config)
+            else call_agent("task_creation_codex", prompt, config)
         )
-        if not output.strip():
-            raise RuntimeError("Codex task creation returned empty output.")
-        _parse_and_write_task_artifacts(output)
+        if not fallback.strip():
+            raise RuntimeError("Codex task creation returned empty output during fallback.")
+        _parse_and_write_task_artifacts(fallback)
         if not TASKS_FILE.exists():
-            TASKS_FILE.write_text(output, encoding="utf-8")
-    else:
-        chief_cfg = config.get("agents", {}).get(agent_key, {})
-        chief_cmd_name = chief_cfg.get("command", "chief")
-        chief_cmd = shutil.which(chief_cmd_name) if str(chief_cmd_name).lower() == "chief" else None
-        primary_error: RuntimeError | None = None
-
-        if chief_cmd:
-            step(1, 2, "Writing chief PRD ...")
-            _write_chief_prd(prompt)
-            for _stale in [TASKS_FILE, TASK_GRAPH_FILE]:
-                if _stale.exists():
-                    _stale.unlink()
-
-            if live_task_output:
-                step(2, 2, "Running chief in background (streaming to AGENT.OUTPUT) ...")
-                _run_chief_background(config)
-            else:
-                step(2, 2, "Running chief (suspending TUI) - will auto-start and auto-close ...")
-                if _RENDERER is not None:
-                    _RENDERER.suspend()
-                try:
-                    sys.stdout.write("\033[#25h\033[0m\033[2J\033[H")
-                    sys.stdout.flush()
-                    print("\033[1;96m  Chief Task Creation\033[0m")
-                    print("\033[96m  Chief is starting - auto-pressing 's' in a moment.\033[0m\n")
-                    proc = subprocess.Popen(
-                        [chief_cmd] + chief_cfg.get("args", []) + ["--no-retry", "main"],
-                        cwd=str(REPO_ROOT),
-                    )
-
-                    def _send_s() -> None:
-                        time.sleep(3)
-                        if proc.poll() is None:
-                            subprocess.run(
-                                [
-                                    "powershell",
-                                    "-NoProfile",
-                                    "-Command",
-                                    "$s = New-Object -ComObject WScript.Shell; $s.SendKeys('s')",
-                                ],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                            )
-
-                    threading.Thread(target=_send_s, daemon=True).start()
-
-                    def _watch_chief() -> None:
-                        while proc.poll() is None:
-                            if validate_tasks_file(TASKS_FILE):
-                                time.sleep(2)
-                                _kill_tree(proc)
-                                return
-                            time.sleep(2)
-
-                    threading.Thread(target=_watch_chief, daemon=True).start()
-                    proc.wait()
-                finally:
-                    sys.stdout.write("\033[#1049l\033[#25h\033[0m\r\n")
-                    sys.stdout.flush()
-                    time.sleep(0.5)
-                    if _RENDERER is not None:
-                        _RENDERER.resume()
-
-                if validate_tasks_file(TASKS_FILE):
-                    for line in TASKS_FILE.read_text(encoding="utf-8").splitlines():
-                        if line.strip():
-                            _emit(
-                                AgentOutput(
-                                    ts=_now_iso(),
-                                    line=line,
-                                    agent=_agent_display_name("task_creation", config),
-                                )
-                            )
-        else:
-            try:
-                output = (
-                    _call_agent_live(agent_key, prompt, config, log_slug="task_creation")
-                    if live_task_output
-                    else call_agent(agent_key, prompt, config)
-                )
-                if output.strip():
-                    _parse_and_write_task_artifacts(output)
-                    if not TASKS_FILE.exists():
-                        TASKS_FILE.write_text(output, encoding="utf-8")
-            except RuntimeError as e:
-                primary_error = e
-
-        if not validate_tasks_file(TASKS_FILE):
-            if mode == "claude_chief_only":
-                raise RuntimeError("Chief did not produce a valid TASKS.md in claude_chief_only mode.")
-            if primary_error is not None:
-                warn(f"Primary task creation agent failed ({primary_error}). Falling back to Codex ...")
-            if chief_cmd:
-                warn("Chief did not produce a valid TASKS.md. Falling back to Codex ...")
-            else:
-                info("Chief not found. Running Codex for task creation ...")
-            _persist_stage_fallback("task_creation", state, config)
-            output = (
-                _call_agent_live("task_creation_codex", prompt, config, log_slug="task_creation_fallback")
-                if live_task_output
-                else call_agent("task_creation_codex", prompt, config)
-            )
-            if not output.strip():
-                raise RuntimeError("Codex task creation returned empty output.")
-            _parse_and_write_task_artifacts(output)
-            if not TASKS_FILE.exists():
-                TASKS_FILE.write_text(output, encoding="utf-8")
+            TASKS_FILE.write_text(fallback, encoding="utf-8")
 
     if TASKS_FILE.exists() and not TASK_GRAPH_FILE.exists():
         _build_task_graph_from_tasks_md()
@@ -3509,7 +3457,6 @@ def _clean_dirs() -> list[Path]:
         LOGS_DIR,
         APPROVALS_DIR,
         PIPELINE_DIR / "state",
-        REPO_ROOT / ".chief" / "prds",
     ]
 
 
@@ -3697,7 +3644,6 @@ def _call_agent_with_fallback(
         if rolled:
             for f in rolled:
                 info(f"  Rolled back: {f}")
-        _persist_stage_fallback("implementation", state, config)
         return invoke_codex_fallback(prompt, config)
 
     (LOGS_DIR / f"{agent_name}_last_output.txt").write_text(output, encoding="utf-8")
@@ -3712,7 +3658,6 @@ def _call_agent_with_fallback(
         if rolled:
             for f in rolled:
                 info(f"  Rolled back: {f}")
-        _persist_stage_fallback("implementation", state, config)
         return invoke_codex_fallback(prompt, config)
 
     return output
@@ -4117,9 +4062,7 @@ AGENT_NPM_PACKAGES: dict[str, str] = {
 }
 
 # Maps CLI command name  curl install script URL
-AGENT_CURL_INSTALLS: dict[str, str] = {
-    "chief": "https://raw.githubusercontent.com/minicodemonkey/chief/main/install.sh",
-}
+AGENT_CURL_INSTALLS: dict[str, str] = {}
 
 
 def _install_via_npm(command: str, pkg: str, npm_cmd: str | None = None) -> bool:
@@ -4277,11 +4220,11 @@ def run_init() -> None:
 
 def show_status(state: dict) -> None:
     banner("A.I.N. Pipeline - Status")
-    current   = state.get("current_stage", "unknown")
+    current = state.get("current_stage", "unknown")
     completed = state.get("completed_stages", [])
-    mode = get_selected_mode(state, load_config())
-    details = get_mode_details(mode)
-
+    config = load_config()
+    mode = get_selected_mode(state, config)
+    details = get_mode_details(mode, config)
     print(f"  Stage:   {C.BOLD}{C.CYAN}{STAGE_LABELS.get(current, current)}{C.RESET}")
     print(f"  Mode:    {C.DIM}{details['label']} | {details['summary']}{C.RESET}")
     if state.get("branch"):
@@ -4399,7 +4342,7 @@ def run_pipeline(
             return cycle_pipeline_mode(load_state(fresh_config), fresh_config)
 
         renderer.configure_mode_controls(
-            get_mode_details(get_selected_mode(state, config)),
+            get_mode_details(get_selected_mode(state, config), config),
             _cycle_mode_from_tui,
         )
 
@@ -4818,7 +4761,7 @@ def _run_with_tui(
                     current_state = load_state(current_config)
                     available_modes = get_available_pipeline_modes(current_config)
                     current_mode = get_selected_mode(current_state, current_config)
-                    mode_options = [get_mode_details(mode_key) for mode_key in available_modes]
+                    mode_options = [get_mode_details(mode_key, current_config) for mode_key in available_modes]
                     selected_mode = renderer.request_mode_selection(mode_options, current_mode)
                     if selected_mode != current_mode:
                         set_pipeline_mode(selected_mode, current_state, current_config)

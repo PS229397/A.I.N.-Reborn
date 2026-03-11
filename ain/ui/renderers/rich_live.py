@@ -353,9 +353,9 @@ class RichLiveRenderer:
         self._lock = threading.RLock()
         self._running = False
         self._mode_details: dict[str, str] = {
-            "key": "default",
-            "label": "Default",
-            "summary": "Gemini -> Codex -> Chief -> Claude",
+            "key": "default_balanced",
+            "label": "Default (Balanced)",
+            "summary": "Gemini scan → GPT-5.2 Codex planning/task creation → Claude Sonnet 4.6 implementation",
         }
         self._cycle_mode_cb: Callable[[], dict[str, str]] | None = None
         # Input gate: set() when the user submits input inside the TUI
@@ -540,6 +540,10 @@ class RichLiveRenderer:
                 self._mode_select_result = state.mode_select_view.current_mode
                 state.mode_select_view = None
                 self._mode_select_ready.set()
+            else:
+                # Refresh view when toggling tier selector or cycling tiers.
+                if self._live is not None:
+                    self._live.update(self._render_root())
             return
 
         key_norm = key.key.lower() if len(key.key) == 1 else key.key

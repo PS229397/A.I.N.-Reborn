@@ -1,80 +1,145 @@
 {
   "agents": {
-    "architecture": {
+    "scan_gemini": {
       "command": "gemini",
       "args": [],
-      "model": "gemini-2.5-flash",
-      "description": "Gemini for architecture analysis — run: gemini --version to verify"
+      "model": "gemini-3.1-flash-lite",
+      "description": "Gemini 3.1 Flash Lite for scanning and architecture analysis.",
+      "skills": [
+        "codebase analysis",
+        "system architecture reasoning"
+      ]
     },
-    "planning": {
+    "codex_lite": {
       "command": "codex",
       "args": [],
-      "model": "gpt-5.1",
-      "prompt_mode": "arg",
-      "description": "OpenAI Codex for planning — run: codex --version to verify"
-    },
-    "planning_codex": {
-      "command": "codex",
-      "args": [],
-      "model": "gpt-5.1",
-      "prompt_mode": "arg",
-      "description": "OpenAI Codex for planning generation in codex_only mode"
-    },
-    "planning_chief": {
-      "command": "chief",
-      "args": [],
-      "model": "claude-opus-4.1",
-      "description": "Chief planning agent for claude_chief_only mode"
-    },
-    "task_creation": {
-      "command": "chief",
-      "args": [],
-      "model": "claude-sonnet-4-20250514",
-      "description": "Chief autonomous PRD agent — auto-installed by ain init"
-    },
-    "task_creation_codex": {
-      "command": "codex",
-      "args": [
-        "exec"
-      ],
-      "model": "gpt-5-codex",
+      "model": "gpt-5.1-codex",
       "prompt_mode": "stdin",
-      "description": "OpenAI Codex for task creation in codex_only mode"
+      "description": "GPT-5.1 Codex for planning, brainstorming, and task creation.",
+      "skills": [
+        "software planning",
+        "task decomposition",
+        "multi-step reasoning"
+      ]
     },
-    "implementation": {
+    "codex_balanced": {
+      "command": "codex",
+      "args": [],
+      "model": "gpt-5.2-codex",
+      "prompt_mode": "stdin",
+      "description": "GPT-5.2 Codex for planning and implementation with extra scale.",
+      "skills": [
+        "software planning",
+        "tool orchestration",
+        "code synthesis"
+      ]
+    },
+    "codex_max": {
+      "command": "codex",
+      "args": [],
+      "model": "gpt-5.3-codex-max",
+      "prompt_mode": "stdin",
+      "description": "GPT-5.3 Codex Max for long-context planning and code generation.",
+      "skills": [
+        "autonomous planning",
+        "deep code synthesis",
+        "extended context reasoning"
+      ]
+    },
+    "claude_lite": {
       "command": "claude",
       "args": [
         "--allowedTools",
         "Edit,Write,Bash,Read,Glob,Grep"
       ],
       "model": "claude-sonnet-4-20250514",
-      "description": "Claude Code for implementation with file access — primary (Codex fallback enabled)"
+      "description": "Claude Sonnet 4.5 for implementation with multi-file editing.",
+      "skills": [
+        "software implementation",
+        "code refactoring",
+        "debugging"
+      ]
     },
-    "implementation_codex": {
+    "claude_balanced": {
+      "command": "claude",
+      "args": [
+        "--allowedTools",
+        "Edit,Write,Bash,Read,Glob,Grep"
+      ],
+      "model": "claude-sonnet-4-20260115",
+      "description": "Claude Sonnet 4.6 for adaptive implementation with broader reasoning.",
+      "skills": [
+        "implementation",
+        "architectural reasoning",
+        "automation"
+      ]
+    },
+    "claude_max": {
+      "command": "claude",
+      "args": [
+        "--allowedTools",
+        "Edit,Write,Bash,Read,Glob,Grep"
+      ],
+      "model": "claude-opus-4.6",
+      "description": "Claude Opus 4.6 for maximum context implementation workflows.",
+      "skills": [
+        "long-context coding",
+        "team orchestration",
+        "execution supervision"
+      ]
+    },
+    "gemini_only": {
+      "command": "gemini",
+      "args": [],
+      "model": "gemini-3.1-flash-lite",
+      "description": "Gemini 3.1 Flash Lite handling scan, planning, and implementation.",
+      "skills": [
+        "end-to-end planning",
+        "code generation",
+        "architecture reasoning"
+      ]
+    },
+    "task_creation_codex": {
       "command": "codex",
       "args": [
         "exec"
       ],
-      "model": "gpt-5.1-codex-max",
+      "model": "gpt-5.3-codex-max",
       "prompt_mode": "stdin",
-      "description": "OpenAI Codex for implementation in codex_only mode"
+      "description": "Codex Max fallback for task creation if other agents fail.",
+      "skills": [
+        "task generation",
+        "planning feedback"
+      ]
     },
     "implementation_fallback": {
       "command": "codex",
       "args": [
-        "--approval-mode", "full-auto"
+        "--approval-mode",
+        "full-auto"
       ],
-      "model": "gpt-5.1-codex-max",
+      "model": "gpt-5.3-codex-max",
       "prompt_mode": "arg",
-      "description": "Codex in full-auto mode — fallback when Claude hits token limit during implementation"
+      "description": "Codex fallback for implementation when other agents exceed limits.",
+      "skills": [
+        "code recovery",
+        "autonomous implementation"
+      ]
     }
   },
   "pipeline_mode": {
-    "default": "default",
+    "default": "default_balanced",
     "available": [
-      "default",
-      "codex_only",
-      "claude_chief_only"
+      "default_lite",
+      "default_balanced",
+      "default_max",
+      "codex_only_lite",
+      "codex_only_balanced",
+      "codex_only_max",
+      "claude_only_lite",
+      "claude_only_balanced",
+      "claude_only_max",
+      "gemini_only"
     ]
   },
   "validation": {
