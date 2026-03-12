@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from ain.ui.renderers.rich_live import RichLiveRenderer
@@ -10,8 +11,8 @@ from ain.ui.renderers.rich_live import RichLiveRenderer
 class RichRenderer(RichLiveRenderer):
     """Backwards-compatible name used by older pipeline code."""
 
-    def __init__(self, version: str = "0.1.8", **kwargs: Any) -> None:
-        super().__init__(version=version, **kwargs)
+    def __init__(self, version: str = "0.1.8", task_graph_file: Path | None = None, **kwargs: Any) -> None:
+        super().__init__(version=version, task_graph_file=task_graph_file, **kwargs)
 
     def subscribe(self, emitter: Any) -> None:
         self.attach_emitter(emitter)

@@ -73,33 +73,37 @@ _C_DIM_CYAN   = _C_SECONDARY_TEXT
 
 # Single border colour used on every panel for visual consistency.
 _C_BORDER     = "#ff2d6f"
-_TASK_GRAPH_FILE = Path.cwd() / "docs" / "TASK_GRAPH.json"
+# NOTE: _TASK_GRAPH_FILE is no longer module-level; it is passed per-instance
+# via RichLiveRenderer(task_graph_file=...) and stored as self._task_graph_file.
 
 # Stage status -> (symbol, Rich color)
 _STAGE_STYLE: dict[str, tuple[str, str]] = {
     "queued":  ("◈", _C_DIM_CYAN),
     "running": ("▶", _C_NEON_PINK),
     "done":    ("◆", _C_NEON_CYAN),
-    "failed":  ("✖", _C_NEON_CYAN),
+    "failed":  ("✖", _C_NEON_RED),
 }
 
 # Log level -> Rich color
 _LEVEL_COLOR: dict[LogLevel, str] = {
     LogLevel.DEBUG: _C_NEON_CYAN,
     LogLevel.INFO:  _C_NEON_PINK,
-    LogLevel.WARN:  _C_NEON_CYAN,
-    LogLevel.ERROR: _C_NEON_CYAN,
+    LogLevel.WARN:  _C_NEON_AMBER,
+    LogLevel.ERROR: _C_NEON_RED,
 }
 
 # Run status -> Rich color
 _RUN_STATUS_COLOR: dict[str, str] = {
     "idle":             _C_NEON_CYAN,
-    "running":          _C_NEON_PINK,
-    "waiting_approval": _C_NEON_CYAN,
+    "running":          _C_NEON_CYAN,
+    "waiting_approval": _C_NEON_AMBER,
     "done":             _C_NEON_CYAN,
-    "failed":           _C_NEON_CYAN,
-    "interrupted":      _C_NEON_CYAN,
+    "failed":           _C_NEON_RED,
+    "interrupted":      _C_NEON_AMBER,
 }
+
+# Spinner frames cycled when run_status == "running" (4 fps via _tick_loop).
+_SPIN_FRAMES = ("⠏", "⠇", "⠧", "⠦", "⠴", "⠼", "⠸", "⠹", "⠙", "⠋")
 
 # Bottom keybar entries: (key label, action description)
 _KEYBAR_ENTRIES: list[tuple[str, str]] = [
@@ -111,9 +115,6 @@ _KEYBAR_ENTRIES: list[tuple[str, str]] = [
     ("T", "tasks"),
     ("F", "freeze"),
 ]
-
-# Approval action shown only when awaiting approval.
-_KEYBAR_APPROVE = None
 
 # Help text lines shown in the help overlay.
 _HELP_LINES: list[tuple[str, str]] = [
@@ -335,6 +336,7 @@ class RichLiveRenderer:
         on_quit_clean: Callable[[], None] | None = None,
         on_restart: Callable[[], None] | None = None,
         on_approve: Callable[[], None] | None = None,
+        task_graph_file: Path | None = None,
     ) -> None:
         self._console = console or Console()
         self._refresh_per_second = refresh_per_second
@@ -344,6 +346,8 @@ class RichLiveRenderer:
         self._on_quit_clean = on_quit_clean
         self._on_restart = on_restart
         self._on_approve = on_approve
+        self._task_graph_file: Path = task_graph_file or (Path.cwd() / "docs" / "TASK_GRAPH.json")
+        self._spin_idx: int = 0
         self._state = _RendererState()
         self._live: Live | None = None
         self._kbd: _KeyboardPoller | None = None
@@ -507,8 +511,9 @@ class RichLiveRenderer:
 
     def _tick_loop(self) -> None:
         while self._running:
-            time.sleep(1)
+            time.sleep(0.25)
             with self._lock:
+                self._spin_idx += 1
                 if self._live is not None:
                     self._live.update(self._render_root())
 
@@ -924,10 +929,10 @@ class RichLiveRenderer:
         return None
 
     def _load_task_entries(self) -> list[_TaskEntry]:
-        if not _TASK_GRAPH_FILE.exists():
+        if not self._task_graph_file.exists():
             return []
         try:
-            payload = json.loads(_TASK_GRAPH_FILE.read_text(encoding="utf-8"))
+            payload = json.loads(self._task_graph_file.read_text(encoding="utf-8"))
         except Exception:
             return []
 
@@ -1115,7 +1120,7 @@ class RichLiveRenderer:
     def _build_status_bar(self) -> Panel:
         state = self._state
         elapsed = self._elapsed_str()
-        run_color = _C_NEON_CYAN
+        run_color = _RUN_STATUS_COLOR.get(state.run_status, _C_NEON_CYAN)
 
         bar = Text()
 
@@ -1133,7 +1138,12 @@ class RichLiveRenderer:
         bar.append(f" v{self._version}", style=_C_DIM_CYAN)
         bar.append("  ║  ", style=_C_NEON_PINK)
         bar.append("SYS:", style=_C_NEON_PINK)
-        bar.append(f" {state.run_status.upper().replace('_', '.')}", style=run_color)
+        if state.run_status == "running":
+            spin = _SPIN_FRAMES[self._spin_idx % len(_SPIN_FRAMES)]
+            bar.append(f" {spin} ", style=run_color)
+        else:
+            bar.append(" ", style="")
+        bar.append(f"{state.run_status.upper().replace('_', '.')}", style=run_color)
         bar.append("  ║  ", style=_C_NEON_PINK)
         bar.append("UPTIME:", style=_C_NEON_PINK)
         bar.append(f" {elapsed}", style=_C_NEON_CYAN)
@@ -1160,7 +1170,7 @@ class RichLiveRenderer:
         "pending": ("◦", _C_DIM_CYAN),
         "running": ("▷", "#2EDCD1"),
         "done":    ("▶", _C_NEON_PINK),
-        "failed":  ("✖", _C_NEON_CYAN),
+        "failed":  ("✖", _C_NEON_RED),
     }
     _FOCUS_ORDER: tuple[str, ...] = ("none", "deck", "data", "stage", "agent")
 
@@ -1185,7 +1195,7 @@ class RichLiveRenderer:
                 symbol, color = _STAGE_STYLE.get(entry.status, ("?", "#2EDCD1"))
                 name_text = Text(entry.stage_name, style=color)
                 if not self._state.compact and entry.error:
-                    name_text.append(f"\n  ERR: {entry.error}", style=_C_NEON_CYAN)
+                    name_text.append(f"\n  ERR: {entry.error}", style=_C_NEON_RED)
                 time_text = Text(
                     f"{entry.duration_ms / 1000:.1f}s" if entry.duration_ms is not None else "",
                     style=_C_DIM_CYAN,
@@ -1202,7 +1212,7 @@ class RichLiveRenderer:
                         task_text.append(desc, style=t_color)
                         task_text.append(f"  /{task.agent}/", style=_C_DIM_CYAN)
                         if task.error:
-                            task_text.append(f"  {task.error}", style=_C_NEON_CYAN)
+                            task_text.append(f"  {task.error}", style=_C_NEON_RED)
                         task_time = Text(
                             f"{task.duration_ms / 1000:.1f}s" if task.duration_ms is not None else "",
                             style=_C_DIM_CYAN,
@@ -1236,7 +1246,7 @@ class RichLiveRenderer:
                 if task.agent and task.status == "running":
                     task_text.append(f"  /{task.agent}/", style=_C_DIM_CYAN)
                 if task.error:
-                    task_text.append(f"  {task.error}", style=_C_NEON_CYAN)
+                    task_text.append(f"  {task.error}", style=_C_NEON_RED)
                 rows.append((Text(symbol, style=color), task_text))
 
         for icon, content in self._window_slice(rows, self._state.stage_scroll_offset, self._timing_panel_lines()):
@@ -1341,9 +1351,6 @@ class RichLiveRenderer:
             (k, "unfreeze" if k == "F" and self._focused_panel_frozen() else d)
             for k, d in entries
         ]
-
-        if state.awaiting_approval and _KEYBAR_APPROVE:
-            entries.append(_KEYBAR_APPROVE)
 
         bar = Text()
         for i, (key, desc) in enumerate(entries):

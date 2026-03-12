@@ -150,6 +150,7 @@ FEATURE_SPEC_FILE       = DOCS_DIR / "FEATURE_SPEC.md"
 TASKS_FILE              = DOCS_DIR / "TASKS.md"
 TASK_GRAPH_FILE         = DOCS_DIR / "TASK_GRAPH.json"
 IMPLEMENTATION_LOG_FILE = DOCS_DIR / "IMPLEMENTATION_LOG.md"
+GITIGNORE_FILE          = REPO_ROOT / ".gitignore"
 
 PLANNING_APPROVED_FLAG = APPROVALS_DIR / "planning_approved.flag"
 
@@ -1693,10 +1694,10 @@ def _build_tree(root: Path, ignore: set[str], prefix: str = "", depth: int = 0, 
         return []
     visible = [e for e in entries if e.name not in ignore]
     for i, entry in enumerate(visible):
-        connector = " " if i == len(visible) - 1 else " "
+        connector = "└ " if i == len(visible) - 1 else "├ "
         lines.append(f"{prefix}{connector}{entry.name}")
         if entry.is_dir():
-            ext = "    " if i == len(visible) - 1 else "   "
+            ext = "    " if i == len(visible) - 1 else "│   "
             lines.extend(_build_tree(entry, ignore, prefix + ext, depth + 1, max_depth))
     return lines
 
@@ -1914,10 +1915,11 @@ def run_architecture(state: dict, config: dict) -> None:
         if ARCHITECTURE_FILE.exists():
             ARCHITECTURE_FILE.unlink()
 
-        codex_cmd = shutil.which("codex") or "codex"
+        fallback_key = "codex_balanced"
+        fallback_cmd = _resolve_agent_command(fallback_key, config)
         _, codex_output = _run_agent_background(
-            [codex_cmd],
-            agent_name="Codex (gpt-5.1)",
+            fallback_cmd,
+            agent_name=_agent_display_name(fallback_key, config),
             log_slug="architecture_codex",
             input_text=full_prompt,
         )
@@ -2114,11 +2116,12 @@ def _run_suspended(cmd: list, title: str = "") -> int:
             _RENDERER.resume()
 
 
-def _collect_multiline_input(prompt_header: str) -> str:
+def _collect_multiline_input(prompt_header: str, initial_text: str = "") -> str:
     """Suspend TUI, collect multi-line input from the user, resume TUI.
 
     The user types their text and submits by entering '---' on a blank line
-    or pressing Ctrl+D / Ctrl+Z.
+    or pressing Ctrl+D / Ctrl+Z.  If *initial_text* is provided it is printed
+    as a pre-filled reference before the prompt so the user can re-type/edit it.
     Returns the collected text (stripped).
     """
     if _RENDERER is not None:
@@ -2130,6 +2133,8 @@ def _collect_multiline_input(prompt_header: str) -> str:
         print(f"\033[1;91m{'-' * width}\033[0m")
         print(f"\033[96m  Type your description below.\033[0m")
         print(f"\033[96m  Enter \033[1m---\033[0m\033[96m on a new line to finish.\033[0m\n")
+        if initial_text:
+            print(f"\033[2m{initial_text}\033[0m\n")
         lines: list[str] = []
         try:
             while True:
@@ -3087,34 +3092,6 @@ def _first_inline_code(text: str | None) -> str | None:
     return match.group(1).strip() if match else None
 
 
-def _planned_file_change_from_open_questions() -> dict[str, Any] | None:
-    """Derive the docs/test.md planned change from resolved OPEN_QUESTIONS.md answers."""
-    if not OPEN_QUESTIONS_FILE.exists():
-        warn("docs/OPEN_QUESTIONS.md not found  skipping planned file change extraction.")
-        return None
-
-    content = OPEN_QUESTIONS_FILE.read_text(encoding="utf-8")
-    path_answer = _first_inline_code(_find_answer("A1", content))
-    body_answer = _first_inline_code(_find_answer("A2", content))
-
-    if not path_answer or not body_answer:
-        warn("Could not parse docs/OPEN_QUESTIONS.md for planned file change values.")
-        return None
-
-    if path_answer != "docs/test.md":
-        warn(f"OPEN_QUESTIONS.md suggests path '{path_answer}' (expected docs/test.md). Using provided value.")
-    if body_answer != "# hello world":
-        warn("OPEN_QUESTIONS.md suggests content different from '# hello world'. Using provided value.")
-
-    return {
-        "path": path_answer,
-        "content": body_answer,
-        "operation": "create",
-        "allow_overwrite": False,
-        "ensure_parent_dir": True,
-    }
-
-
 def _upsert_planned_file_change(state: dict[str, Any], change: dict[str, Any]) -> None:
     """Insert or replace a planned file change in state.planned_file_changes."""
     changes: list[Any] = state.setdefault("planned_file_changes", [])
@@ -3316,12 +3293,6 @@ def run_planning_generation(state: dict, config: dict) -> None:
         sys.exit(0)
 
     success("Planning documents validated.")
-    planned_change = _planned_file_change_from_open_questions()
-    if planned_change:
-        _upsert_planned_file_change(state, planned_change)
-        info(f"Planned file change registered for {planned_change['path']}")
-    else:
-        warn("No planned file change added from docs/OPEN_QUESTIONS.md.")
     set_stage("task_creation", state)
 
 
@@ -3798,11 +3769,15 @@ def notify_fallback_and_get_decision(context: str, timeout_secs: int = 30) -> bo
     print(f"  {C.GREEN}[f]{C.RESET}  Use codex fallback agent for this task")
     print(f"  {C.YELLOW}[s]{C.RESET}  Skip this task and continue")
     print()
+    _tui_suspend()
     try:
-        choice = input("  Choice [f/s] (default: f): ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        return False
-    return choice != "s"
+        try:
+            choice = input("  Choice [f/s] (default: f): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return False
+        return choice != "s"
+    finally:
+        _tui_resume()
 
 
 def _call_agent_with_fallback(
@@ -3838,26 +3813,20 @@ def _call_agent_with_fallback(
     (LOGS_DIR / f"{agent_name}_last_prompt.txt").write_text(prompt, encoding="utf-8")
 
     try:
-        if _EMITTER is not None:
-            if prompt_mode == "arg":
-                rc, output = _run_agent_background(
-                    cmd + [prompt],
-                    agent_name=_agent_display_name(agent_name, config),
-                    log_slug="implementation",
-                )
-            else:
-                rc, output = _run_agent_background(
-                    cmd,
-                    agent_name=_agent_display_name(agent_name, config),
-                    log_slug="implementation",
-                    input_text=prompt,
-                )
-            stderr = ""
-            returncode = rc
+        if prompt_mode == "arg":
+            returncode, output = _run_agent_background(
+                cmd + [prompt],
+                agent_name=_agent_display_name(agent_name, config),
+                log_slug="implementation",
+            )
         else:
-            output = call_agent(agent_name, prompt, config)
-            stderr = ""
-            returncode = 0
+            returncode, output = _run_agent_background(
+                cmd,
+                agent_name=_agent_display_name(agent_name, config),
+                log_slug="implementation",
+                input_text=prompt,
+            )
+        stderr = ""
     except FileNotFoundError:
         raise RuntimeError(
             f"Agent command not found: '{command}'. "
@@ -3941,13 +3910,7 @@ def _run_one_task(
     workspace_before = _workspace_status_snapshot()
     try:
         task_prompt = _build_task_prompt(task, prompt_file)
-        if mode == "default" and agent_key == "implementation":
-            _call_agent_with_fallback(agent_key, task_prompt, state, config)
-        else:
-            if _EMITTER is not None:
-                _call_agent_live(agent_key, task_prompt, config, log_slug=f"implementation_task_{task_id}")
-            else:
-                call_agent(agent_key, task_prompt, config)
+        _call_agent_with_fallback(agent_key, task_prompt, state, config)
 
         _emit_workspace_delta(agent_name, workspace_before)
 
@@ -4986,6 +4949,7 @@ def _run_with_tui(
             version=_ver,
             on_quit=lambda: _request_quit(clean=False),
             on_quit_clean=lambda: _request_quit(clean=True),
+            task_graph_file=TASK_GRAPH_FILE,
         )
         renderer.subscribe(emitter)
         renderer.start()
