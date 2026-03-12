@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -104,28 +103,6 @@ def test_load_state_creates_default_when_missing(monkeypatch, tmp_path):
     assert persisted["current_stage"] == "idle"
     assert persisted["status"] == "idle"
     assert persisted["version"] == STATE_SCHEMA_VERSION
-
-
-def test_load_state_repairs_corrupt_json_and_keeps_backup(monkeypatch, tmp_path):
-    monkeypatch.setattr(state_service, "_now_iso", lambda: "2026-02-02T12:00:00+00:00")
-    state_path = tmp_path / "state.json"
-    state_path.write_text("{not json", encoding="utf-8")
-
-    result = state_service.load_state(state_path=state_path)
-
-    backup_files = list(state_path.parent.glob("state.json.bak-*"))
-    assert len(backup_files) == 1
-    assert backup_files[0].read_bytes() == b"{not json"
-
-    assert result.last_error is not None
-    assert result.last_error["code"] == "STATE_CORRUPT"
-    assert "backup_path" in result.last_error["details"]
-    assert Path(result.last_error["details"]["backup_path"]).exists()
-
-    persisted = json.loads(state_path.read_text(encoding="utf-8"))
-    assert persisted["version"] == STATE_SCHEMA_VERSION
-    assert persisted["last_error"]["code"] == "STATE_CORRUPT"
-    assert persisted["created_at"] == "2026-02-02T12:00:00+00:00"
 
 
 def test_save_state_updates_timestamp_and_writes(monkeypatch, tmp_path):

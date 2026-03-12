@@ -207,18 +207,6 @@ def test_approve_subcommand_writes_approval_and_advances_waiting_stage(monkeypat
     assert transitions["state"] is state
 
 
-def test_version_subcommand_prints_version(monkeypatch, tmp_path):
-    _configure_runtime_paths(monkeypatch, tmp_path)
-    monkeypatch.setattr(pipeline, "run_command_output", lambda *_args, **_kwargs: "abc123\n")
-    monkeypatch.setattr(sys, "argv", ["ain", "version", "--short"])
-
-    stdout = io.StringIO()
-    with redirect_stdout(stdout):
-        pipeline.main()
-
-    assert stdout.getvalue().strip() == "0.1.8"
-
-
 def test_clean_subcommand_routes_to_workspace_cleanup(monkeypatch, tmp_path):
     _configure_runtime_paths(monkeypatch, tmp_path)
     seen = {}

@@ -37,7 +37,6 @@ import sys
 import threading
 import time
 import tempfile
-import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,7 +46,6 @@ from typing import Any
 from ain.models.state import MultilineInputMode, MultilineInputState, PlannedFileChange, StageTiming
 from ain.runtime.emitter import Emitter
 from ain.runtime.events import (
-    ApprovedEvent,
     ApprovalReceived,
     AwaitingApproval,
     CancelMultilineInputEvent,
@@ -68,7 +66,6 @@ from ain.runtime.events import (
     TaskStarted,
     AgentOutput,
     SubmitMultilineInputEvent,
-    WaitingApprovalEvent,
 )
 from ain.services import config_service, log_service, state_service
 
@@ -523,8 +520,6 @@ def step(n: int, total: int, text: str) -> None:
 # 
 
 _EMITTER: Emitter | None = None
-_RUN_ID: str = ""
-
 # Optional TUI renderer with suspend/resume capability.
 # Set by run_pipeline() when a Rich renderer is active so that interactive
 # input prompts can temporarily hand the terminal back to cooked mode.
@@ -704,7 +699,11 @@ def _default_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
         ((config or {}).get("pipeline_mode") or {}).get("default")
         or "default"
     )
+    now = datetime.now(timezone.utc).isoformat()
     return {
+        "version": state_service.STATE_SCHEMA_VERSION,
+        "created_at": now,
+        "updated_at": now,
         "current_stage": "idle", "branch": None,
         "started_at": None, "last_updated": None, "completed_stages": [],
         "fallback_mode": {},
@@ -718,7 +717,6 @@ def _default_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
         "selected_mode": selected_mode,
         "mode_changed_at": None,
         "status": "idle",
-        "run_id": None,
         "last_approval_time": None,
     }
 
@@ -741,8 +739,6 @@ def load_state_with_backfill(
         merged["mode_changed_at"] = None
     if not merged.get("status"):
         merged["status"] = merged.get("current_stage", "idle")
-    if "run_id" not in merged:
-        merged["run_id"] = None
     if "last_approval_time" not in merged:
         merged["last_approval_time"] = None
     return merged
@@ -750,18 +746,27 @@ def load_state_with_backfill(
 
 def load_state(config: dict[str, Any] | None = None) -> dict[str, Any]:
     current_config = config or load_config()
-    if STATE_FILE.exists():
+    if not STATE_FILE.exists():
+        return _default_state(current_config)
+    try:
         with open(STATE_FILE, encoding="utf-8") as f:
             raw = json.load(f)
-        state = load_state_with_backfill(raw, current_config)
-        if state != raw:
-            save_state(state)
-        return state
-    return _default_state(current_config)
+    except Exception:
+        # Corrupt JSON — delegate to state_service for backup and reset.
+        state_service.load_state(state_path=STATE_FILE)
+        return _default_state(current_config)
+    state = load_state_with_backfill(raw, current_config)
+    if state != raw:
+        save_state(state)
+    return state
 
 
 def save_state(state: dict[str, Any]) -> None:
-    state["last_updated"] = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc).isoformat()
+    state["last_updated"] = now
+    state["updated_at"] = now
+    state.setdefault("created_at", now)
+    state.setdefault("version", state_service.STATE_SCHEMA_VERSION)
     PIPELINE_DIR.mkdir(parents=True, exist_ok=True)
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
@@ -1470,33 +1475,20 @@ def run_command_output(cmd: list[str] | str, cwd: Path | None = None) -> str:
 # 
 
 def call_agent(agent_name: str, prompt: str, config: dict) -> str:
-    agent_cfg   = config["agents"].get(agent_name, {})
-    command     = agent_cfg.get("command", agent_name)
-    extra_args  = agent_cfg.get("args", [])
-    model       = agent_cfg.get("model")
-    prompt_mode = agent_cfg.get("prompt_mode", "stdin")  # "stdin" | "arg"
+    cmd = _resolve_agent_command(agent_name, config)
+    prompt_mode = config.get("agents", {}).get(agent_name, {}).get("prompt_mode", "stdin")
+    display = _agent_display_name(agent_name, config)
 
-    # Resolve full path so subprocess finds .cmd wrappers on Windows
-    resolved = shutil.which(command)
-    if resolved:
-        command = resolved
-
-    cmd = [command] + extra_args
-    if model:
-        cmd += ["--model", model]
-
-    info(f"Invoking {agent_cfg.get('command', agent_name)} ({agent_name}) ...")
-    _log(f"AGENT CALL: {agent_name} via {command}\n\t(prompt_mode={prompt_mode})")
+    info(f"Invoking {display} ({agent_name}) ...")
+    _log(f"AGENT CALL: {agent_name} via {cmd[0]}\n\t(prompt_mode={prompt_mode})")
 
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     (LOGS_DIR / f"{agent_name}_last_prompt.txt").write_text(prompt, encoding="utf-8")
 
     try:
         if prompt_mode == "arg":
-            # Pass prompt as a positional argument (e.g. codex "prompt text")
             result = run_command(cmd + [prompt], capture=True, timeout=600)
         else:
-            # Default: pipe prompt via stdin
             result = run_command(cmd, capture=True, input_text=prompt, timeout=600)
         output = result.stdout or ""
         if result.returncode != 0:
@@ -1506,7 +1498,7 @@ def call_agent(agent_name: str, prompt: str, config: dict) -> str:
         return output
     except FileNotFoundError:
         raise RuntimeError(
-            f"Agent command not found: '{command}'. "
+            f"Agent command not found: '{cmd[0]}'. "
             f"Edit .ai-pipeline/config.json to configure the '{agent_name}' agent."
         )
     except subprocess.TimeoutExpired:
@@ -3375,19 +3367,8 @@ def _build_task_graph_from_tasks_md() -> None:
 
 def _call_agent_live(agent_name: str, prompt: str, config: dict, *, log_slug: str) -> str:
     """Run an agent while streaming output into AGENT.OUTPUT, then return captured text."""
-    agent_cfg = config.get("agents", {}).get(agent_name, {})
-    command = agent_cfg.get("command", agent_name)
-    extra_args = agent_cfg.get("args", [])
-    model = agent_cfg.get("model")
-    prompt_mode = agent_cfg.get("prompt_mode", "stdin")
-
-    resolved = shutil.which(command)
-    if resolved:
-        command = resolved
-
-    cmd = [command] + extra_args
-    if model:
-        cmd += ["--model", model]
+    cmd = _resolve_agent_command(agent_name, config)
+    prompt_mode = config.get("agents", {}).get(agent_name, {}).get("prompt_mode", "stdin")
 
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     (LOGS_DIR / f"{agent_name}_last_prompt.txt").write_text(prompt, encoding="utf-8")
@@ -3530,7 +3511,7 @@ def run_waiting_approval(state: dict, config: dict) -> None:
         return
 
     while True:
-        _emit(AwaitingApproval(run_id=_RUN_ID, stage_id="waiting_approval"))
+        _emit(AwaitingApproval(run_id="", stage_id="waiting_approval"))
         info("Task creation completed. Review tasks before implementation continues.")
 
         tasks = _extract_tasks_for_review()
@@ -3563,7 +3544,7 @@ def run_waiting_approval(state: dict, config: dict) -> None:
             APPROVALS_DIR.mkdir(parents=True, exist_ok=True)
             approved_at = datetime.now(timezone.utc).isoformat()
             PLANNING_APPROVED_FLAG.write_text(f"Approved: {approved_at}\n", encoding="utf-8")
-            _emit(ApprovalReceived(run_id=_RUN_ID, actor="user", at=approved_at))
+            _emit(ApprovalReceived(run_id="", actor="user", at=approved_at))
             success("Tasks approved. Advancing to implementation.")
             set_stage("implementation", state)
             for f in [TASK_REVIEW_FEEDBACK_FILE, _LEGACY_TASK_REVIEW_FEEDBACK_FILE]:
@@ -3786,28 +3767,13 @@ def _call_agent_with_fallback(
     state: dict[str, Any],
     config: dict,
 ) -> str:
-    """Call an implementation agent; on token-limit failure, offer codex fallback.
+    """Call an implementation agent; on non-zero exit, roll back and invoke codex fallback."""
+    cmd = _resolve_agent_command(agent_name, config)
+    prompt_mode = config.get("agents", {}).get(agent_name, {}).get("prompt_mode", "stdin")
+    display = _agent_display_name(agent_name, config)
 
-    Wraps ``call_agent()`` with:
-    - stderr / exit-code inspection for token-limit signals
-    - user prompt to roll back and switch to the codex fallback agent
-    """
-    agent_cfg   = config.get("agents", {}).get(agent_name, {})
-    command     = agent_cfg.get("command", agent_name)
-    extra_args  = agent_cfg.get("args", [])
-    model       = agent_cfg.get("model")
-    prompt_mode = agent_cfg.get("prompt_mode", "stdin")
-
-    resolved = shutil.which(command)
-    if resolved:
-        command = resolved
-
-    cmd = [command] + extra_args
-    if model:
-        cmd += ["--model", model]
-
-    info(f"Invoking {agent_cfg.get('command', agent_name)} ({agent_name}) ...")
-    _log(f"AGENT CALL: {agent_name} via {command}\n\t(prompt_mode={prompt_mode})")
+    info(f"Invoking {display} ({agent_name}) ...")
+    _log(f"AGENT CALL: {agent_name} via {cmd[0]}\n\t(prompt_mode={prompt_mode})")
 
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
     (LOGS_DIR / f"{agent_name}_last_prompt.txt").write_text(prompt, encoding="utf-8")
@@ -3816,20 +3782,20 @@ def _call_agent_with_fallback(
         if prompt_mode == "arg":
             returncode, output = _run_agent_background(
                 cmd + [prompt],
-                agent_name=_agent_display_name(agent_name, config),
+                agent_name=display,
                 log_slug="implementation",
             )
         else:
             returncode, output = _run_agent_background(
                 cmd,
-                agent_name=_agent_display_name(agent_name, config),
+                agent_name=display,
                 log_slug="implementation",
                 input_text=prompt,
             )
         stderr = ""
     except FileNotFoundError:
         raise RuntimeError(
-            f"Agent command not found: '{command}'. "
+            f"Agent command not found: '{cmd[0]}'. "
             f"Edit .ai-pipeline/config.json to configure the '{agent_name}' agent."
         )
     except subprocess.TimeoutExpired:
@@ -4476,16 +4442,14 @@ def run_pipeline(
     mode: str = "plain",
     renderer: Any = None,
 ) -> None:
-    global _EMITTER, _RUN_ID, _RENDERER
+    global _EMITTER, _RENDERER
     _EMITTER = emitter
     _RENDERER = renderer
-    _RUN_ID = str(uuid.uuid4())
 
     ensure_config()
     config = load_config()
     state  = load_state(config)
     _APPROVAL_EVENT.clear()
-    state["run_id"] = _RUN_ID
     if not state.get("status") or state.get("status") == "idle":
         state["status"] = "running"
     save_state(state)
@@ -4531,7 +4495,7 @@ def run_pipeline(
         state["status"] = FAILED
         state["current_stage"] = FAILED
         save_state(state)
-        _emit(RunCompleted(run_id=_RUN_ID, ended_at=_now_iso(), status=RunStatus.FAILED))
+        _emit(RunCompleted(run_id="", ended_at=_now_iso(), status=RunStatus.FAILED))
         return
 
     if renderer is not None and hasattr(renderer, "configure_mode_controls"):
@@ -4574,7 +4538,7 @@ def run_pipeline(
 
     to_run = [current] if single_stage else STAGES[idx:]
 
-    _emit(RunStarted(run_id=_RUN_ID, started_at=_now_iso(), mode=mode))  # type: ignore[arg-type]
+    _emit(RunStarted(run_id="", started_at=_now_iso(), mode=mode))
 
     runnable = [s for s in to_run if s not in ("idle", "done") and STAGE_RUNNERS.get(s)]
     stage_indices = {stage: idx for idx, stage in enumerate(runnable)}
@@ -4626,7 +4590,7 @@ def run_pipeline(
                     error_code="INTERRUPTED",
                 )
             )
-            _emit(RunCompleted(run_id=_RUN_ID, ended_at=ended_at, status=RunStatus.INTERRUPTED))
+            _emit(RunCompleted(run_id="", ended_at=ended_at, status=RunStatus.INTERRUPTED))
             warn("\nInterrupted by user.")
             sys.exit(0)
         except Exception as e:  # noqa: BLE001 - error fencing
@@ -4645,7 +4609,7 @@ def run_pipeline(
                     error_code=err_code,
                 )
             )
-            _emit(RunCompleted(run_id=_RUN_ID, ended_at=ended_at, status=RunStatus.FAILED))
+            _emit(RunCompleted(run_id="", ended_at=ended_at, status=RunStatus.FAILED))
             try:
                 log_service.log_error_record(
                     err_code or "PIPELINE_STAGE_ERROR",
@@ -4685,7 +4649,7 @@ def run_pipeline(
     if state["current_stage"] == "done":
         banner("Pipeline Complete")
         show_status(state)
-        _emit(RunCompleted(run_id=_RUN_ID, ended_at=_now_iso(), status=RunStatus.DONE))
+        _emit(RunCompleted(run_id="", ended_at=_now_iso(), status=RunStatus.DONE))
 
 # 
 # CLI
@@ -4805,7 +4769,7 @@ def main() -> None:
         approved_at = datetime.now(timezone.utc).isoformat()
         PLANNING_APPROVED_FLAG.write_text(f"Approved: {approved_at}\n", encoding="utf-8")
         success("Planning approved.")
-        _emit(ApprovalReceived(run_id=_RUN_ID, actor="user", at=approved_at))
+        _emit(ApprovalReceived(run_id="", actor="user", at=approved_at))
         state = load_state()
         if state["current_stage"] == "waiting_approval":
             set_stage("implementation", state)
