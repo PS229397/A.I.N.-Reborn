@@ -1161,26 +1161,36 @@ class RichLiveRenderer:
         bar.append("UPTIME:", style=_C_NEON_PINK)
         bar.append(f" {elapsed}", style=_C_NEON_CYAN)
         bar.append("  ║  ", style=_C_NEON_PINK)
-        # MODE/MODEL display derived from current mode details
-        model_line = (self._mode_details.get("model_lines") or [""])[0].replace("//", "").strip()
-        # Pick a short model family label from the model_line
-        if "codex" in model_line.lower():
-            model_label = "Codex"
-        elif "claude" in model_line.lower():
-            model_label = "Claude"
-        elif "gemini" in model_line.lower():
-            model_label = "Gemini"
-        else:
-            model_label = "Model"
+        # MODEL display: derive from the workflow's planning/implementation agents (not scan).
+        # model_lines entries look like "// Scan: ...", "// Plan: ...", "// Code: ...", etc.
+        all_lines = self._mode_details.get("model_lines") or []
+        _family_order = ["codex", "claude", "gemini"]
+        seen_families: list[str] = []
+        for ml in all_lines:
+            ml_lower = ml.lower()
+            # Skip the scan line — it's always Gemini and doesn't reflect the chosen workflow.
+            if "scan:" in ml_lower:
+                continue
+            for fam in _family_order:
+                if fam in ml_lower and fam not in seen_families:
+                    seen_families.append(fam)
+        if not seen_families:
+            # Fall back: inspect all lines including scan
+            for ml in all_lines:
+                ml_lower = ml.lower()
+                for fam in _family_order:
+                    if fam in ml_lower and fam not in seen_families:
+                        seen_families.append(fam)
+        model_label = " / ".join(f.capitalize() for f in seen_families) or "Model"
 
         bar.append("MODEL:", style=_C_NEON_PINK)
         bar.append(f" {model_label}", style=_C_NEON_CYAN)
 
-        # MODE (tier) label, hidden for Gemini-only
+        # MODE (tier) label, hidden for Gemini-only workflow
         mode_key = self._mode_details.get("key", "")
         base, tier = (mode_key.rsplit("_", 1) + [""])[:2] if "_" in mode_key else (mode_key, "")
         mode_label = tier.capitalize() if tier else mode_key
-        if model_label != "Gemini" and mode_label:
+        if seen_families != ["gemini"] and mode_label:
             bar.append("  ║  ", style=_C_NEON_PINK)
             bar.append("MODE:", style=_C_NEON_PINK)
             bar.append(f" {mode_label}", style=_C_NEON_CYAN)

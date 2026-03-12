@@ -328,7 +328,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "scan_gemini": {
             "command": "gemini",
             "args": [],
-            "model": "gemini-1.5-flash",
+            "model": "gemini-2.5-flash",
             "description": "Gemini for scanning and architecture analysis",
             "skills": [
                 "codebase analysis",
@@ -383,7 +383,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "gemini_only": {
             "command": "gemini",
             "args": [],
-            "model": "gemini-1.5-flash",
+            "model": "gemini-2.5-flash",
             "description": "Gemini for every stage (free-tier safe)",
             "skills": ["end-to-end planning", "code generation", "architecture reasoning"],
         },
@@ -1686,12 +1686,7 @@ def run_architecture(state: dict, config: dict) -> None:
     if ARCHITECTURE_FILE.exists():
         ARCHITECTURE_FILE.unlink()
 
-    rc, gemini_output = _run_agent_background(
-        [resolved] + extra_args,
-        agent_name=_agent_display_name(agent_key, config),
-        log_slug="architecture",
-        input_text=full_prompt,  # embed context directly  .ai-pipeline/ may be gitignored
-    )
+    rc, gemini_output = _call_agent_no_tty(agent_key, full_prompt, config, log_slug="architecture")
 
     # Gemini outputs to stdout (no write_file tool available via stdin mode).
     # Strip executor noise lines that Gemini emits when tool calls are blocked.
@@ -1701,6 +1696,7 @@ def run_architecture(state: dict, config: dict) -> None:
             if not l.startswith("[LocalAgentExecutor]")
             and not l.startswith("Attempt ")
             and not l.startswith("Error executing tool")
+            and "stdin is not a terminal" not in l
         ).strip()
         if clean_output:
             ARCHITECTURE_FILE.write_text(clean_output, encoding="utf-8")
@@ -1717,13 +1713,7 @@ def run_architecture(state: dict, config: dict) -> None:
             ARCHITECTURE_FILE.unlink()
 
         fallback_key = "codex_balanced"
-        fallback_cmd = _resolve_agent_command(fallback_key, config)
-        _, codex_output = _run_agent_background(
-            fallback_cmd,
-            agent_name=_agent_display_name(fallback_key, config),
-            log_slug="architecture_codex",
-            input_text=full_prompt,
-        )
+        _, codex_output = _call_agent_no_tty(fallback_key, full_prompt, config, log_slug="architecture_codex")
 
         # Codex may write the file directly or output it to stdout.
         if not (ARCHITECTURE_FILE.exists() and ARCHITECTURE_FILE.stat().st_size > 0):
@@ -2560,8 +2550,68 @@ def run_user_context(state: dict, config: dict) -> None:
     set_stage("planning_questions", state)
 
 
+def _call_planning_questions_agent(agent_key: str, prompt: str, config: dict, *, live: bool) -> str:
+    """Invoke the planning-questions agent using the correct prompt-delivery method.
+
+    codex requires the ``exec`` subcommand and the prompt passed as a CLI arg
+    (reading from a non-TTY stdin causes "stdin is not a terminal").
+    claude requires ``--print`` mode with the prompt as a CLI arg (the
+    implementation tool-flags are inappropriate here and agentic mode also
+    rejects non-TTY stdin).
+    All other agents fall back to the standard call_agent / _call_agent_live path.
+    """
+    agent_cfg = config.get("agents", {}).get(agent_key, {})
+    command_name = str(agent_cfg.get("command", agent_key)).lower()
+    model = agent_cfg.get("model", "")
+    display = _agent_display_name(agent_key, config)
+
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    (LOGS_DIR / f"{agent_key}_last_prompt.txt").write_text(prompt, encoding="utf-8")
+
+    def _save_and_return(output: str) -> str:
+        (LOGS_DIR / f"{agent_key}_last_output.txt").write_text(output, encoding="utf-8")
+        return output
+
+    if "codex" in command_name:
+        codex_bin = shutil.which("codex") or "codex"
+        cmd: list[str] = [codex_bin, "exec"]
+        if model:
+            cmd += ["--model", model]
+        cmd.append(prompt)
+        if live:
+            rc, output = _run_agent_background(cmd, agent_name=display, log_slug="planning_questions")
+            if rc != 0:
+                warn(f"Agent {agent_key} exited {rc}")
+            return _save_and_return(output)
+        result = run_command(cmd, capture=True, timeout=600)
+        if result.returncode != 0:
+            warn(f"Agent {agent_key} exited {result.returncode}")
+        return _save_and_return(result.stdout or "")
+
+    if "claude" in command_name:
+        claude_bin = shutil.which("claude") or "claude"
+        cmd = [claude_bin, "--print"]
+        if model:
+            cmd += ["--model", model]
+        cmd.append(prompt)
+        if live:
+            rc, output = _run_agent_background(cmd, agent_name=display, log_slug="planning_questions")
+            if rc != 0:
+                warn(f"Agent {agent_key} exited {rc}")
+            return _save_and_return(output)
+        result = run_command(cmd, capture=True, timeout=600)
+        if result.returncode != 0:
+            warn(f"Agent {agent_key} exited {result.returncode}")
+        return _save_and_return(result.stdout or "")
+
+    # Gemini and any other agents: use the standard paths.
+    if live:
+        return _call_agent_live(agent_key, prompt, config, log_slug="planning_questions")
+    return call_agent(agent_key, prompt, config)
+
+
 # Stage 3: Planning Questions (Codex)
-# 
+#
 
 def run_planning_questions(state: dict, config: dict) -> None:
     # Track how many question rounds we've run to avoid infinite loops.
@@ -2588,33 +2638,23 @@ def run_planning_questions(state: dict, config: dict) -> None:
     except Exception:
         pass
 
-    ctx_path = BRAINSTORM_CONTEXT_FILE.relative_to(REPO_ROOT)
-    prompt = (
-        "You are the planning brainstorm agent. Do NOT call any tools or attempt to read/write files. "
-        "Read the context below and output the final markdown to stdout only; AIN will save it.\n\n"
-        f"Context file path (for reference only): {ctx_path}\n"
-        f"Print markdown with this structure:\n"
-        "# Open Questions\n"
-        "- Q: <question>\n  A: <answer or Needs input>\n"
-        "Limit to the 10 most important uncertainties. Keep questions short and specific.\n\n"
-        "---\n"
-        "# Feature Request\n"
-        f"{feature_description}\n\n"
-        "# Architecture Overview\n"
-        f"{arch_ctx[:4000]}\n"
-        "---"
+    prompt_file = PROMPTS_DIR / "planning_questions_prompt.md"
+    if not prompt_file.exists():
+        raise RuntimeError(f"Missing prompt: {prompt_file}")
+    prompt = prompt_file.read_text(encoding="utf-8").format(
+        feature_description=feature_description,
+        arch_ctx=arch_ctx[:4000],
     )
 
     live = _EMITTER is not None
-    call = (
-        (lambda: _call_agent_live(agent_key, prompt, config, log_slug="planning_questions"))
-        if live
-        else (lambda: call_agent(agent_key, prompt, config))
-    )
-    output = call().strip()
+    raw_output = _call_planning_questions_agent(agent_key, prompt, config, live=live).strip()
 
-    if output:
-        OPEN_QUESTIONS_FILE.write_text(output, encoding="utf-8")
+    # Agents (especially codex) may echo the task/prompt before their response.
+    # Extract only the "# Open Questions" section so noise doesn't pollute the file.
+    questions_output = _extract_questions_section(raw_output)
+
+    if questions_output:
+        OPEN_QUESTIONS_FILE.write_text(questions_output, encoding="utf-8")
 
     if (not OPEN_QUESTIONS_FILE.exists() or OPEN_QUESTIONS_FILE.stat().st_size == 0) and "gemini" in agent_key:
         info("Primary brainstorm agent did not produce output; opening interactive Gemini brainstorm session ...")
@@ -2623,8 +2663,28 @@ def run_planning_questions(state: dict, config: dict) -> None:
     if not OPEN_QUESTIONS_FILE.exists() or OPEN_QUESTIONS_FILE.stat().st_size == 0:
         raise RuntimeError("Planning brainstorm agent did not produce docs/OPEN_QUESTIONS.md.")
 
+    # Only advance to planning_answers if there are actual questions to answer.
+    if not re.search(r"^- Q:", OPEN_QUESTIONS_FILE.read_text(encoding="utf-8"), re.MULTILINE):
+        raise RuntimeError(
+            "Planning brainstorm output contains no questions (- Q: lines). "
+            "Check .ai-pipeline/logs/ for raw agent output and re-run."
+        )
+
     success(f"Questions written: {OPEN_QUESTIONS_FILE.relative_to(REPO_ROOT)}")
     set_stage("planning_answers", state)
+
+
+def _extract_questions_section(text: str) -> str:
+    """Return only the '# Open Questions' section from agent output.
+
+    Agents like codex may echo the task prompt before generating their response.
+    Searching for the heading strips any leading noise so OPEN_QUESTIONS.md
+    contains only the structured questions output.
+    """
+    match = re.search(r"^(# Open Questions\b.*)", text, re.MULTILINE | re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return text.strip()
 
 
 def _build_answers_template() -> str:
@@ -2655,6 +2715,13 @@ def run_planning_answers(state: dict, config: dict) -> None:
     existing = OPEN_ANSWERS_FILE.read_text(encoding="utf-8") if OPEN_ANSWERS_FILE.exists() else ""
     template = _build_answers_template()
     initial_text = existing or template
+
+    # Don't open the Q&A container if there are no actual questions to answer.
+    if not template and not existing:
+        raise RuntimeError(
+            "OPEN_QUESTIONS.md contains no questions (- Q: lines). "
+            "Re-run planning_questions to regenerate it."
+        )
     prompt_text = (
         "Answer each question below on the A: line. Keep answers concise.\n"
         "If something is still unclear, write 'Needs input'. "
@@ -2864,11 +2931,11 @@ def _run_planning_fallback_claude(prompt: str) -> None:
     if not claude_bin:
         warn("claude not found  no further planning fallback available.")
         return
+    # Pass prompt as a CLI arg — claude rejects non-TTY stdin in agentic mode.
     _, output = _run_agent_background(
-        [claude_bin, "--print"],
+        [claude_bin, "--print", prompt],
         agent_name="Claude - planning",
         log_slug="planning_generation_claude",
-        input_text=prompt,
     )
     if output.strip():
         _parse_and_write_planning_docs(output)
@@ -3036,12 +3103,10 @@ def run_planning_generation(state: dict, config: dict) -> None:
     if "codex" in command_name:
         planning_ok = _run_planning_in_background(agent_key, planning_prompt, config)
     else:
-        resolved_cmd = _resolve_agent_command(agent_key, config)
-        rc, output = _run_agent_background(
-            resolved_cmd,
-            agent_name=f"{_agent_display_name(agent_key, config)} - planning",
+        rc, output = _call_agent_no_tty(
+            agent_key, planning_prompt, config,
             log_slug="planning_generation",
-            input_text=planning_prompt,
+            display_suffix="planning",
         )
         if rc == 0 and output.strip():
             _parse_and_write_planning_docs(output)
@@ -3159,6 +3224,55 @@ def _build_task_graph_from_tasks_md() -> None:
         "completed": sum(1 for t in tasks if t["status"] == "completed"),
     }
     TASK_GRAPH_FILE.write_text(json.dumps(graph, indent=2), encoding="utf-8")
+
+
+def _call_agent_no_tty(
+    agent_key: str,
+    prompt: str,
+    config: dict,
+    *,
+    log_slug: str,
+    display_suffix: str = "",
+) -> tuple[int, str]:
+    """Background agent call that never requires an interactive TTY.
+
+    Routing:
+      codex  → ``codex exec`` + prompt via stdin  (exec subcommand reads stdin without TTY)
+      claude → ``claude --print <prompt>``         (agentic mode rejects non-TTY stdin)
+      gemini → ``gemini @<prompt_file>``           (gemini rejects non-TTY stdin)
+      other  → stdin fallback
+    """
+    agent_cfg = config.get("agents", {}).get(agent_key, {})
+    command_name = str(agent_cfg.get("command", agent_key)).lower()
+    model = agent_cfg.get("model", "")
+    display = _agent_display_name(agent_key, config)
+    if display_suffix:
+        display = f"{display} - {display_suffix}"
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+    if "codex" in command_name:
+        cmd = _resolve_agent_command(agent_key, config)
+        if "exec" not in cmd[1:]:
+            cmd = [cmd[0], "exec", *cmd[1:]]
+        return _run_agent_background(cmd, agent_name=display, log_slug=log_slug, input_text=prompt)
+
+    if "claude" in command_name:
+        claude_bin = shutil.which("claude") or "claude"
+        cmd: list[str] = [claude_bin, "--print"]
+        if model:
+            cmd += ["--model", model]
+        cmd.append(prompt)
+        return _run_agent_background(cmd, agent_name=display, log_slug=log_slug)
+
+    if "gemini" in command_name:
+        prompt_path = LOGS_DIR / f"{log_slug}_last_prompt.txt"
+        prompt_path.write_text(prompt, encoding="utf-8")
+        cmd = _resolve_agent_command(agent_key, config) + [f"@{prompt_path}"]
+        return _run_agent_background(cmd, agent_name=display, log_slug=log_slug)
+
+    # Fallback: try stdin (may fail for CLIs that require TTY)
+    cmd = _resolve_agent_command(agent_key, config)
+    return _run_agent_background(cmd, agent_name=display, log_slug=log_slug, input_text=prompt)
 
 
 def _call_agent_live(agent_name: str, prompt: str, config: dict, *, log_slug: str) -> str:
