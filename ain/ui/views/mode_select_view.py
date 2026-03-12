@@ -99,7 +99,6 @@ class ModeSelectView:
         body = Text()
         body.append("Select Pipeline Workflow\n\n", style=_C_NEON_PINK)
         selected_models: list[str] = []
-        selected_summary: str | None = None
         for idx, base in enumerate(self._bases):
             is_selected = idx == self._selected_base
             marker = ">" if is_selected else " "
@@ -109,11 +108,10 @@ class ModeSelectView:
             body.append(f"{base['label']}\n", style=text_style)
             if is_selected:
                 tier_idx = self._tier_idx.get(base["base_key"], 0)
-                model_line = base["tiers"][tier_idx].get("model_line")
-                if model_line:
-                    selected_models.append(model_line)
-                if base.get("summary"):
-                    selected_summary = base["summary"]
+                model_lines = base["tiers"][tier_idx].get("model_line") or []
+                if isinstance(model_lines, str):
+                    model_lines = [model_lines]
+                selected_models.extend(model_lines)
                 if self._tier_select_active and len(base["tiers"]) > 1:
                     body.append("  ", style=_C_SECONDARY_TEXT)
                     for t_idx, tier in enumerate(base["tiers"]):
@@ -123,12 +121,10 @@ class ModeSelectView:
                         tier_style = _C_NEON_PINK if selected else _C_SECONDARY_TEXT
                         body.append(f"{open_b}{tier['tier']}{close_b} ", style=tier_style)
                     body.append("\n", style=_C_SECONDARY_TEXT)
-        if selected_models or selected_summary:
+        if selected_models:
             body.append("\n", style=_C_SECONDARY_TEXT)
             for line in selected_models:
                 body.append(f"  {line}\n", style=_C_SECONDARY_TEXT)
-            if selected_summary:
-                body.append(f"  {selected_summary}\n", style=_C_SECONDARY_TEXT)
 
         body.append("\n  ↑/↓ workflow  ENTER open/confirm  ←/→ tier  ESC back", style=_C_SECONDARY_TEXT)
 
@@ -177,7 +173,7 @@ class ModeSelectView:
                 {
                     "key": mkey,
                     "tier": tier or "only",
-                    "model_line": (mode.get("model_lines") or [""])[0],
+                    "model_line": mode.get("model_lines") or [],
                 }
             )
 

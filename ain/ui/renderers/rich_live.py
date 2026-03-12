@@ -102,8 +102,21 @@ _RUN_STATUS_COLOR: dict[str, str] = {
     "interrupted":      _C_NEON_AMBER,
 }
 
-# Spinner frames cycled when run_status == "running" (4 fps via _tick_loop).
-_SPIN_FRAMES = ("⠇", "⠏", "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧")
+# Spinner frames cycled when run_status == "running" (configurable via _tick_loop).
+# _SPIN_FRAMES = ("⠇", "⠏", "⠋", "⠉", "⠙", "⠹", "⠸", "⠼", "⠴", "⠤", "⠦", "⠧")
+_SPIN_FRAMES = ( "▰▱▱▱▱▱▱",
+                 "▰▰▱▱▱▱▱",
+                 "▰▰▰▱▱▱▱",
+                 "▰▰▰▰▱▱▱",
+                 "▰▰▰▰▰▱▱",
+                 "▰▰▰▰▰▰▱",
+                 "▰▰▰▰▰▰▰",
+                 "▱▰▰▰▰▰▰",
+                 "▱▱▰▰▰▰▰",
+                 "▱▱▱▰▰▰▰",
+                 "▱▱▱▱▰▰▰",
+                 "▱▱▱▱▱▰▰",
+                 "▱▱▱▱▱▱▰")
 
 # Bottom keybar entries: (key label, action description)
 _KEYBAR_ENTRIES: list[tuple[str, str]] = [
@@ -511,7 +524,7 @@ class RichLiveRenderer:
 
     def _tick_loop(self) -> None:
         while self._running:
-            time.sleep(0.25)
+            time.sleep(0.5)
             with self._lock:
                 self._spin_idx += 1
                 if self._live is not None:
@@ -1138,12 +1151,11 @@ class RichLiveRenderer:
         bar.append(f" v{self._version}", style=_C_DIM_CYAN)
         bar.append("  ║  ", style=_C_NEON_PINK)
         bar.append("SYS:", style=_C_NEON_PINK)
+        bar.append(" ", style="")
+        bar.append(f"{state.run_status.upper().replace('_', '.')}", style=run_color)
         if state.run_status == "running":
             spin = _SPIN_FRAMES[self._spin_idx % len(_SPIN_FRAMES)]
-            bar.append(f" {spin} ", style=run_color)
-        else:
-            bar.append(" ", style="")
-        bar.append(f"{state.run_status.upper().replace('_', '.')}", style=run_color)
+            bar.append(f" {spin}", style=run_color)
         bar.append("  ║  ", style=_C_NEON_PINK)
         bar.append("UPTIME:", style=_C_NEON_PINK)
         bar.append(f" {elapsed}", style=_C_NEON_CYAN)

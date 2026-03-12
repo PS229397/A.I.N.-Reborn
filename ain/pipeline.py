@@ -1275,27 +1275,18 @@ def _build_mode_model_lines(mode: str, config: dict[str, Any]) -> list[str]:
     tasks = _fmt(stage_map.get("task_creation"))
     impl = _fmt(stage_map.get("implementation"))
 
-    # If everything is the same agent, collapse to one line.
-    agent_set = {k for k in [scan, plan, tasks, impl] if k}
-    if len(agent_set) == 1:
-        only = agent_set.pop()
-        return [f"//scan+plan+tasks+impl {only}"]
-
-    parts: list[str] = []
+    lines: list[str] = []
     if scan:
-        parts.append(f"//scan {scan}")
-    # Merge plan/tasks when identical
-    if plan and tasks and plan == tasks:
-        parts.append(f"//plan+tasks {plan}")
-    else:
-        if plan:
-            parts.append(f"//plan {plan}")
-        if tasks:
-            parts.append(f"//tasks {tasks}")
+        lines.append(f"// Scan: {scan}     // Scans the repository structure")
+    if plan:
+        lines.append(f"// Plan: {plan}     // Brainstorms with user about the bug/feature")
+    if tasks:
+        lines.append(f"// Task: {tasks}     // Creates a task list to use during implementation")
     if impl:
-        parts.append(f"//impl {impl}")
+        lines.append(f"// Code: {impl}     // Implements feature/bug based on planning documents")
 
-    return ["  ".join(parts)]
+    # Fallback to a single unknown line if somehow empty
+    return lines or ["// Model: unknown"]
 
 
 def resolve_stage_agent_key(stage_name: str, state: dict[str, Any], config: dict[str, Any]) -> str:
