@@ -202,7 +202,10 @@ def _coerce_pipeline_state(payload: dict) -> PipelineState:
 
 
 def _backup_corrupt_state(state_path: Path) -> Path:
-    backup_path = state_path.with_name(f"{state_path.name}.bak-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}")
+    # Store backups in the pipeline logs dir to avoid cluttering .ai-pipeline root.
+    state_logs_dir = state_path.parent / "state_logs"
+    state_logs_dir.mkdir(parents=True, exist_ok=True)
+    backup_path = state_logs_dir / f"{state_path.name}.bak-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
     backup_path.write_bytes(state_path.read_bytes())
     return backup_path
 

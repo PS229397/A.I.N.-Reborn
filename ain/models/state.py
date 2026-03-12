@@ -39,6 +39,7 @@ class PlannedFileChange:
 class MultilineInputMode(str, Enum):
     FEATURE_DESCRIPTION = "feature_description"
     TASK_DENIAL_FEEDBACK = "task_denial_feedback"
+    PLANNING_ANSWERS = "planning_answers"
 
 
 @dataclass

@@ -75,10 +75,13 @@ class ModeSelectView:
                 self._tier_select_active = False
             self._selected_base = (self._selected_base + 1) % len(self._bases)
             return ModeSelectResult("none")
-        if norm in {"left", "right"} and self._tier_select_active and len(base["tiers"]) > 1:
-            delta = -1 if norm == "left" else 1
-            cur = self._tier_idx.get(base["base_key"], 0)
-            self._tier_idx[base["base_key"]] = (cur + delta) % len(base["tiers"])
+        if norm in {"left", "right"}:
+            if len(base["tiers"]) > 1:
+                if not self._tier_select_active:
+                    self._tier_select_active = True
+                delta = -1 if norm == "left" else 1
+                cur = self._tier_idx.get(base["base_key"], 0)
+                self._tier_idx[base["base_key"]] = (cur + delta) % len(base["tiers"])
             return ModeSelectResult("none")
         if norm == "enter":
             if not self._tier_select_active and len(base["tiers"]) > 1:
@@ -95,6 +98,8 @@ class ModeSelectView:
     def render(self) -> Panel:
         body = Text()
         body.append("Select Pipeline Workflow\n\n", style=_C_NEON_PINK)
+        selected_models: list[str] = []
+        selected_summary: str | None = None
         for idx, base in enumerate(self._bases):
             is_selected = idx == self._selected_base
             marker = ">" if is_selected else " "
@@ -106,10 +111,9 @@ class ModeSelectView:
                 tier_idx = self._tier_idx.get(base["base_key"], 0)
                 model_line = base["tiers"][tier_idx].get("model_line")
                 if model_line:
-                    body.append(f"  {model_line}\n", style=_C_SECONDARY_TEXT)
+                    selected_models.append(model_line)
                 if base.get("summary"):
-                    body.append(f"  {base['summary']}\n", style=_C_SECONDARY_TEXT)
-
+                    selected_summary = base["summary"]
                 if self._tier_select_active and len(base["tiers"]) > 1:
                     body.append("  ", style=_C_SECONDARY_TEXT)
                     for t_idx, tier in enumerate(base["tiers"]):
@@ -119,6 +123,13 @@ class ModeSelectView:
                         tier_style = _C_NEON_PINK if selected else _C_SECONDARY_TEXT
                         body.append(f"{open_b}{tier['tier']}{close_b} ", style=tier_style)
                     body.append("\n", style=_C_SECONDARY_TEXT)
+        if selected_models or selected_summary:
+            body.append("\n", style=_C_SECONDARY_TEXT)
+            for line in selected_models:
+                body.append(f"  {line}\n", style=_C_SECONDARY_TEXT)
+            if selected_summary:
+                body.append(f"  {selected_summary}\n", style=_C_SECONDARY_TEXT)
+
         body.append("\n  ↑/↓ workflow  ENTER open/confirm  ←/→ tier  ESC back", style=_C_SECONDARY_TEXT)
 
         footer_table = Table.grid(padding=(0, 1))

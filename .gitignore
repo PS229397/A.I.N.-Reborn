@@ -32,9 +32,10 @@ node_modules/
 .ai-pipeline/state.json
 .ai-pipeline/state.json.bak*
 .ai-pipeline/logs/
+.ai-pipeline/state_logs/
 .ai-pipeline/scan/
-.ai-pipeline/user_context.md
-.ai-pipeline/brainstorm_context.md
+docs/user_context.md
+docs/brainstorm_context.md
 .ai-pipeline/approvals/
 .ai-pipeline/state/
 

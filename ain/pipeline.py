@@ -84,6 +84,35 @@ def _strip_ansi(s: str) -> str:
     return _ANSI_ESC.sub("", s)
 
 
+# Ensure legacy context files are migrated to docs/ so TUI and agents share one location.
+def _migrate_context_files() -> None:
+    try:
+        if _LEGACY_USER_CONTEXT_FILE.exists():
+            USER_CONTEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
+            USER_CONTEXT_FILE.write_text(_LEGACY_USER_CONTEXT_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+            _LEGACY_USER_CONTEXT_FILE.unlink(missing_ok=True)
+        if _LEGACY_BRAINSTORM_CONTEXT_FILE.exists():
+            BRAINSTORM_CONTEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
+            BRAINSTORM_CONTEXT_FILE.write_text(
+                _LEGACY_BRAINSTORM_CONTEXT_FILE.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            _LEGACY_BRAINSTORM_CONTEXT_FILE.unlink(missing_ok=True)
+    except Exception as exc:  # noqa: BLE001
+        warn(f"Could not migrate legacy context files: {exc}")
+
+def _migrate_task_feedback_file() -> None:
+    try:
+        if _LEGACY_TASK_REVIEW_FEEDBACK_FILE.exists():
+            TASK_REVIEW_FEEDBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
+            TASK_REVIEW_FEEDBACK_FILE.write_text(
+                _LEGACY_TASK_REVIEW_FEEDBACK_FILE.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            _LEGACY_TASK_REVIEW_FEEDBACK_FILE.unlink(missing_ok=True)
+    except Exception as exc:  # noqa: BLE001
+        warn(f"Could not migrate legacy task feedback file: {exc}")
+
+
 # 
 # Paths  (REPO_ROOT = cwd so the package works in any repo)
 # 
@@ -95,10 +124,14 @@ CONFIG_FILE       = PIPELINE_DIR / "config.json"
 SCAN_DIR          = PIPELINE_DIR / "scan"
 PROMPTS_DIR       = PIPELINE_DIR / "prompts"
 LOGS_DIR          = PIPELINE_DIR / "logs"
+STATE_LOGS_DIR    = PIPELINE_DIR / "state_logs"
 APPROVALS_DIR     = PIPELINE_DIR / "approvals"
-USER_CONTEXT_FILE = PIPELINE_DIR / "user_context.md"
-BRAINSTORM_CONTEXT_FILE = PIPELINE_DIR / "brainstorm_context.md"
-TASK_REVIEW_FEEDBACK_FILE = PIPELINE_DIR / "task_review_feedback.md"
+USER_CONTEXT_FILE = REPO_ROOT / "docs" / "user_context.md"
+BRAINSTORM_CONTEXT_FILE = REPO_ROOT / "docs" / "brainstorm_context.md"
+_LEGACY_USER_CONTEXT_FILE = PIPELINE_DIR / "user_context.md"
+_LEGACY_BRAINSTORM_CONTEXT_FILE = PIPELINE_DIR / "brainstorm_context.md"
+TASK_REVIEW_FEEDBACK_FILE = REPO_ROOT / "docs" / "task_review_feedback.md"
+_LEGACY_TASK_REVIEW_FEEDBACK_FILE = PIPELINE_DIR / "task_review_feedback.md"
 DOCS_DIR      = REPO_ROOT / "docs"
 PIPELINE_LOG  = LOGS_DIR / "pipeline.log"
 NOTIFICATIONS_LOG = LOGS_DIR / "notifications.log"
@@ -130,6 +163,7 @@ STAGES = [
     "architecture",
     "user_context",
     "planning_questions",
+    "planning_answers",
     "planning_generation",
     "task_creation",
     "waiting_approval",
@@ -146,6 +180,7 @@ STAGE_LABELS = {
     "architecture":        "Architecture Generation",
     "user_context":        "Feature Context",
     "planning_questions":  "Planning - Brainstorm",
+    "planning_answers":    "Planning - Answers",
     "planning_generation": "Planning - Generation",
     "task_creation":       "Task Creation",
     "waiting_approval":    "Waiting for Approval",
@@ -182,6 +217,7 @@ PIPELINE_MODES: dict[str, dict[str, Any]] = {
         "summary": "Gemini scan → GPT-5.1 Codex planning/task creation → Claude Sonnet 4.5 implementation",
         "stages": {
             "architecture": "scan_gemini",
+            "planning_questions": "codex_lite",
             "planning_generation": "codex_lite",
             "task_creation": "codex_lite",
             "implementation": "claude_lite",
@@ -192,6 +228,7 @@ PIPELINE_MODES: dict[str, dict[str, Any]] = {
         "summary": "Gemini scan → GPT-5.2 Codex planning/task creation → Claude Sonnet 4.6 implementation",
         "stages": {
             "architecture": "scan_gemini",
+            "planning_questions": "codex_balanced",
             "planning_generation": "codex_balanced",
             "task_creation": "codex_balanced",
             "implementation": "claude_balanced",
@@ -202,6 +239,7 @@ PIPELINE_MODES: dict[str, dict[str, Any]] = {
         "summary": "Gemini scan → GPT-5.3 Codex planning/task creation → Claude Opus 4.6 implementation",
         "stages": {
             "architecture": "scan_gemini",
+            "planning_questions": "codex_max",
             "planning_generation": "codex_max",
             "task_creation": "codex_max",
             "implementation": "claude_max",
@@ -212,6 +250,7 @@ PIPELINE_MODES: dict[str, dict[str, Any]] = {
         "summary": "Gemini scan → GPT-5.1 Codex handles planning, tasks, and implementation",
         "stages": {
             "architecture": "scan_gemini",
+            "planning_questions": "codex_lite",
             "planning_generation": "codex_lite",
             "task_creation": "codex_lite",
             "implementation": "codex_lite",
@@ -222,6 +261,7 @@ PIPELINE_MODES: dict[str, dict[str, Any]] = {
         "summary": "Gemini scan → GPT-5.2 Codex handles planning, tasks, and implementation",
         "stages": {
             "architecture": "scan_gemini",
+            "planning_questions": "codex_balanced",
             "planning_generation": "codex_balanced",
             "task_creation": "codex_balanced",
             "implementation": "codex_balanced",
@@ -232,6 +272,7 @@ PIPELINE_MODES: dict[str, dict[str, Any]] = {
         "summary": "Gemini scan → GPT-5.3 Codex max handles planning, tasks, and implementation",
         "stages": {
             "architecture": "scan_gemini",
+            "planning_questions": "codex_max",
             "planning_generation": "codex_max",
             "task_creation": "codex_max",
             "implementation": "codex_max",
@@ -242,6 +283,7 @@ PIPELINE_MODES: dict[str, dict[str, Any]] = {
         "summary": "Gemini scan → Claude Sonnet 4.6 handles planning, tasks, and implementation",
         "stages": {
             "architecture": "scan_gemini",
+            "planning_questions": "claude_lite",
             "planning_generation": "claude_lite",
             "task_creation": "claude_lite",
             "implementation": "claude_lite",
@@ -252,6 +294,7 @@ PIPELINE_MODES: dict[str, dict[str, Any]] = {
         "summary": "Gemini scan → Claude Opus 4.5 handles planning, tasks, and implementation",
         "stages": {
             "architecture": "scan_gemini",
+            "planning_questions": "claude_balanced",
             "planning_generation": "claude_balanced",
             "task_creation": "claude_balanced",
             "implementation": "claude_balanced",
@@ -262,6 +305,7 @@ PIPELINE_MODES: dict[str, dict[str, Any]] = {
         "summary": "Gemini scan → Claude Opus 4.6 handles planning, tasks, and implementation",
         "stages": {
             "architecture": "scan_gemini",
+            "planning_questions": "claude_max",
             "planning_generation": "claude_max",
             "task_creation": "claude_max",
             "implementation": "claude_max",
@@ -272,6 +316,7 @@ PIPELINE_MODES: dict[str, dict[str, Any]] = {
         "summary": "Gemini 3.1 Flash Lite handles every stage (scan, planning, and implementation)",
         "stages": {
             "architecture": "gemini_only",
+            "planning_questions": "gemini_only",
             "planning_generation": "gemini_only",
             "task_creation": "gemini_only",
             "implementation": "gemini_only",
@@ -288,8 +333,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "scan_gemini": {
             "command": "gemini",
             "args": [],
-            "model": "gemini-3.1-flash-lite",
-            "description": "Gemini 3.1 Flash Lite for scanning and architecture analysis",
+            "model": "gemini-1.5-flash",
+            "description": "Gemini for scanning and architecture analysis",
             "skills": [
                 "codebase analysis",
                 "system architecture reasoning",
@@ -343,8 +388,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "gemini_only": {
             "command": "gemini",
             "args": [],
-            "model": "gemini-3.1-flash-lite",
-            "description": "Gemini 3.1 Flash Lite for every stage (free-tier safe)",
+            "model": "gemini-1.5-flash",
+            "description": "Gemini for every stage (free-tier safe)",
             "skills": ["end-to-end planning", "code generation", "architecture reasoning"],
         },
         "task_creation_codex": {
@@ -1194,6 +1239,9 @@ def _normalize_mode_key(mode: str | None) -> str:
         "default": "default_balanced",
         "codex_only": "codex_only_balanced",
         "claude_chief_only": "claude_only_balanced",
+        "codex": "codex_only_balanced",
+        "claude": "claude_only_balanced",
+        "gemini": "gemini_only",
     }
     return aliases.get(mode, mode)
 
@@ -1857,6 +1905,8 @@ def run_architecture(state: dict, config: dict) -> None:
             success(f"Written  {ARCHITECTURE_FILE.relative_to(REPO_ROOT)}")
 
     if rc != 0 or not _gemini_ok():
+        if get_selected_mode(state, config) == "gemini_only":
+            raise RuntimeError("Gemini-only mode: architecture agent failed to produce docs/architecture.md.")
         warn(f"Gemini {'exited with code ' + str(rc) if rc != 0 else 'did not produce a valid architecture.md'}.")
         warn("Falling back to Codex for architecture generation ...")
 
@@ -2271,7 +2321,7 @@ _FEATURE_DESCRIPTION_CONTEXT_ID = "planning.feature_description"
 _FEATURE_DESCRIPTION_TITLE = "Describe the feature or bug"
 _FEATURE_DESCRIPTION_PROMPT = (
     "Provide a clear, multi-paragraph summary of the feature or bug. "
-    "This description feeds the planning agents and is saved to .ai-pipeline/user_context.md."
+    "This description feeds the planning agents and is saved to docs/user_context.md."
 )
 
 
@@ -2290,6 +2340,11 @@ def _persist_feature_description(
     state["feature_description"] = normalized
     USER_CONTEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
     USER_CONTEXT_FILE.write_text(normalized, encoding="utf-8")
+    try:
+        if _LEGACY_USER_CONTEXT_FILE.exists():
+            _LEGACY_USER_CONTEXT_FILE.unlink()
+    except Exception:
+        pass
 
     try:
         svc_state = service_state or state_service.load_state(state_path=STATE_FILE)
@@ -2313,6 +2368,15 @@ def _ensure_feature_description(state: dict[str, Any], *, source_stage: str) -> 
     existing = (state.get("feature_description") or "").strip()
     if not existing and USER_CONTEXT_FILE.exists():
         existing = USER_CONTEXT_FILE.read_text(encoding="utf-8").strip()
+    # Migrate legacy location if present
+    if not existing and _LEGACY_USER_CONTEXT_FILE.exists():
+        existing = _LEGACY_USER_CONTEXT_FILE.read_text(encoding="utf-8").strip()
+        USER_CONTEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        USER_CONTEXT_FILE.write_text(existing, encoding="utf-8")
+        try:
+            _LEGACY_USER_CONTEXT_FILE.unlink()
+        except Exception:
+            pass
 
     service_state: Any = None
     try:
@@ -2663,6 +2727,7 @@ def _review_tasks_with_popup(tasks: list[dict[str, Any]]) -> tuple[bool, str]:
 
 
 def _rerun_planning_and_task_creation(state: dict[str, Any], config: dict[str, Any], feedback: str) -> dict[str, Any]:
+    _migrate_task_feedback_file()
     TASK_REVIEW_FEEDBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
     TASK_REVIEW_FEEDBACK_FILE.write_text(feedback.strip(), encoding="utf-8")
     info("Task list denied. Re-running planning generation and task creation with your feedback.")
@@ -2681,6 +2746,7 @@ def _rerun_planning_and_task_creation(state: dict[str, Any], config: dict[str, A
 
 def run_user_context(state: dict, config: dict) -> None:
     banner("Stage: Feature Context")
+    _migrate_context_files()
 
     content = _ensure_feature_description(state, source_stage="user_context")
     if not content:
@@ -2696,15 +2762,17 @@ def run_user_context(state: dict, config: dict) -> None:
 # 
 
 def run_planning_questions(state: dict, config: dict) -> None:
-    banner("Stage: Planning  Brainstorm (Codex)")
+    # Track how many question rounds we've run to avoid infinite loops.
+    state["planning_round"] = int(state.get("planning_round", 0)) + 1
+    save_state(state)
+
+    mode = get_selected_mode(state, config)
+    agent_key = resolve_stage_agent_key("planning_questions", state, config)
+    banner(f"Stage: Planning  Brainstorm [mode={mode} agent={agent_key}]")
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
+    _migrate_context_files()
 
     feature_description = _ensure_feature_description(state, source_stage="planning_questions")
-
-    # Brief pause so the TUI can fully settle after the user_context
-    # suspend/resume cycle before we suspend again for Codex.
-    time.sleep(1.5)
-
     arch_ctx = ARCHITECTURE_FILE.read_text(encoding="utf-8") if ARCHITECTURE_FILE.exists() else ""
 
     BRAINSTORM_CONTEXT_FILE.write_text(
@@ -2712,60 +2780,151 @@ def run_planning_questions(state: dict, config: dict) -> None:
         f"## Architecture Overview\n\n{arch_ctx[:4000]}\n",
         encoding="utf-8",
     )
+    try:
+        if _LEGACY_BRAINSTORM_CONTEXT_FILE.exists():
+            _LEGACY_BRAINSTORM_CONTEXT_FILE.unlink()
+    except Exception:
+        pass
 
-    codex_cmd = shutil.which("codex") or "codex"
-    ctx_path  = str(BRAINSTORM_CONTEXT_FILE).replace("\\", "/")
-    out_path  = str(OPEN_QUESTIONS_FILE).replace("\\", "/")
-    brainstorm_prompt = (
-        f"Read {ctx_path} to understand the feature request and the existing codebase. "
-        f"Ask me clarifying questions to remove all ambiguity. "
-        f"When we reach full clarity, write a clean Q&A summary to {out_path}."
+    ctx_path = BRAINSTORM_CONTEXT_FILE.relative_to(REPO_ROOT)
+    prompt = (
+        "You are the planning brainstorm agent. Do NOT call any tools or attempt to read/write files. "
+        "Read the context below and output the final markdown to stdout only; AIN will save it.\n\n"
+        f"Context file path (for reference only): {ctx_path}\n"
+        f"Print markdown with this structure:\n"
+        "# Open Questions\n"
+        "- Q: <question>\n  A: <answer or Needs input>\n"
+        "Limit to the 10 most important uncertainties. Keep questions short and specific.\n\n"
+        "---\n"
+        "# Feature Request\n"
+        f"{feature_description}\n\n"
+        "# Architecture Overview\n"
+        f"{arch_ctx[:4000]}\n"
+        "---"
     )
 
-    info("Suspending TUI  starting Codex brainstorm session ...")
-    info(f"Context: {BRAINSTORM_CONTEXT_FILE.relative_to(REPO_ROOT)}")
-    info(f"Codex will auto-close once it writes {OPEN_QUESTIONS_FILE.name}.")
+    live = _EMITTER is not None
+    call = (
+        (lambda: _call_agent_live(agent_key, prompt, config, log_slug="planning_questions"))
+        if live
+        else (lambda: call_agent(agent_key, prompt, config))
+    )
+    output = call().strip()
 
-    if _RENDERER is not None:
-        _RENDERER.suspend()
-    try:
-        # Fully reset terminal state so Codex's TUI starts clean.
-        sys.stdout.write("\033[#25h\033[0m\033[2J\033[H")
-        sys.stdout.flush()
-        print(f"\033[1;96m   Codex Brainstorm Session \033[0m")
-        print(f"\033[96m  Codex will ask clarifying questions.")
-        print(f"  Press \033[1mEnter\033[0m\033[96m in Codex to confirm the prompt and start.\033[0m\n")
-        proc = subprocess.Popen(
-            [codex_cmd, brainstorm_prompt],
-            cwd=str(REPO_ROOT),
-        )
+    if output:
+        OPEN_QUESTIONS_FILE.write_text(output, encoding="utf-8")
 
-        def _watch_and_close() -> None:
-            """Kill Codex (entire process tree) once OPEN_QUESTIONS.md appears."""
-            while proc.poll() is None:
-                if OPEN_QUESTIONS_FILE.exists() and OPEN_QUESTIONS_FILE.stat().st_size > 0:
-                    time.sleep(2)   # let Codex finish any in-progress writes
-                    _kill_tree(proc)
-                    return
-                time.sleep(1)
+    if (not OPEN_QUESTIONS_FILE.exists() or OPEN_QUESTIONS_FILE.stat().st_size == 0) and "gemini" in agent_key:
+        info("Primary brainstorm agent did not produce output; opening interactive Gemini brainstorm session ...")
+        _run_agent_interactive(agent_key, prompt, config, header="Gemini Brainstorm Session")
 
-        watcher = threading.Thread(target=_watch_and_close, daemon=True)
-        watcher.start()
-        proc.wait()
-    finally:
-        sys.stdout.write("\033[#1049l\033[#25h\033[0m\r\n")
-        sys.stdout.flush()
-        time.sleep(0.5)
-        if _RENDERER is not None:
-            _RENDERER.resume()
+    if not OPEN_QUESTIONS_FILE.exists() or OPEN_QUESTIONS_FILE.stat().st_size == 0:
+        raise RuntimeError("Planning brainstorm agent did not produce docs/OPEN_QUESTIONS.md.")
+
+    success(f"Questions written: {OPEN_QUESTIONS_FILE.relative_to(REPO_ROOT)}")
+    set_stage("planning_answers", state)
+
+
+def _build_answers_template() -> str:
+    if not OPEN_QUESTIONS_FILE.exists():
+        return ""
+    lines = OPEN_QUESTIONS_FILE.read_text(encoding="utf-8").splitlines()
+    questions: list[str] = []
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith("- Q:"):
+            questions.append(stripped.split("Q:", 1)[1].strip())
+    if not questions:
+        return ""
+    parts: list[str] = []
+    for idx, q in enumerate(questions, start=1):
+        parts.append(f"{idx}. {q}\nA: \n")
+    return "\n".join(parts).strip() + "\n"
+
+
+def run_planning_answers(state: dict, config: dict) -> None:
+    banner("Stage: Planning  Answers")
+    _migrate_context_files()
 
     if not OPEN_QUESTIONS_FILE.exists():
-        warn("OPEN_QUESTIONS.md not found. Creating placeholder.")
-        OPEN_QUESTIONS_FILE.write_text("# Open Questions\n\nNo clarification needed.\n", encoding="utf-8")
-    else:
-        success(f"Questions loaded: {OPEN_QUESTIONS_FILE.relative_to(REPO_ROOT)}")
+        raise RuntimeError("docs/OPEN_QUESTIONS.md not found. Run planning_questions first.")
 
-    set_stage("planning_generation", state)
+    DOCS_DIR.mkdir(parents=True, exist_ok=True)
+    existing = OPEN_ANSWERS_FILE.read_text(encoding="utf-8") if OPEN_ANSWERS_FILE.exists() else ""
+    template = _build_answers_template()
+    initial_text = existing or template
+    prompt_text = (
+        "Answer each question below on the A: line. Keep answers concise.\n"
+        "If something is still unclear, write 'Needs input'. "
+        "These answers are saved to docs/OPEN_ANSWERS.md."
+    )
+
+    if _EMITTER is None:
+        answers = _collect_multiline_input("Answer planning questions", initial_text=initial_text).strip()
+        if not answers:
+            warn("No answers provided. Re-run to continue.")
+            sys.exit(0)
+        OPEN_ANSWERS_FILE.write_text(answers, encoding="utf-8")
+        success(f"Answers written: {OPEN_ANSWERS_FILE.relative_to(REPO_ROOT)}")
+        set_stage("planning_generation", state)
+        return
+
+    ctx = MultilineInputState(
+        id="planning.open_answers",
+        title="Answer planning questions",
+        prompt=prompt_text,
+        initial_text=initial_text,
+        value=initial_text,
+        mode=MultilineInputMode.PLANNING_ANSWERS,
+        source_stage="planning_answers",
+    )
+
+    submitted: dict[str, str | None] = {"value": None}
+    cancelled = False
+    done = threading.Event()
+
+    def _on_event(event: Any) -> None:
+        nonlocal cancelled
+        if isinstance(event, SubmitMultilineInputEvent) and event.id == ctx.id:
+            submitted["value"] = event.value
+            done.set()
+        elif isinstance(event, CancelMultilineInputEvent) and event.id == ctx.id:
+            cancelled = True
+            done.set()
+
+    _EMITTER.subscribe(_on_event)
+    try:
+        _EMITTER.open_multiline_input(
+            id=ctx.id,
+            mode=ctx.mode,
+            title=ctx.title,
+            prompt=ctx.prompt,
+            initial_text=ctx.initial_text,
+            source_stage=ctx.source_stage,
+        )
+        while not done.wait(0.2):
+            pass
+    finally:
+        _EMITTER.unsubscribe(_on_event)
+
+    if cancelled:
+        warn("Planning answers input cancelled. Aborting run.")
+        sys.exit(0)
+
+    answers = (submitted["value"] or "").strip()
+    if not answers:
+        warn("No answers provided. Re-run to continue.")
+        sys.exit(0)
+
+    OPEN_ANSWERS_FILE.write_text(answers, encoding="utf-8")
+    success(f"Answers written: {OPEN_ANSWERS_FILE.relative_to(REPO_ROOT)}")
+    # If unclear answers remain, loop once more through questions.
+    needs_more = ("needs input" in answers.lower()) or re.search(r"A:\s*$", answers, re.MULTILINE)
+    if needs_more and state.get("planning_round", 1) < 2:
+        info("Unclear answers detected. Running a second round of brainstorming.")
+        set_stage("planning_questions", state)
+    else:
+        set_stage("planning_generation", state)
 
 
 # 
@@ -2774,13 +2933,15 @@ def run_planning_questions(state: dict, config: dict) -> None:
 
 def _planning_direct_write_prompt() -> str:
     return (
-        "Read .ai-pipeline/user_context.md, docs/OPEN_QUESTIONS.md, and docs/architecture.md "
-        "to understand the feature request. Write three planning documents directly to disk  "
-        "do NOT print them, write the files: docs/PRD.md (headings: # Problem, # Goals, "
-        "# Non Goals, # User Stories, # Success Criteria), docs/DESIGN.md (headings: "
-        "# Architecture Changes, # Data Model, # API Changes, # UI Changes, # Risks), "
-        "docs/FEATURE_SPEC.md (detailed technical spec). Do not ask questions  generate all "
-        "three files now."
+        "Read docs/user_context.md, docs/OPEN_QUESTIONS.md, and docs/architecture.md "
+        "to understand the feature request. IMPORTANT: Do NOT call tools or write files. "
+        "Print the content for three documents to stdout only, using file markers so AIN can save them:\n"
+        "<!-- FILE: docs/PRD.md -->\n<content>\n<!-- END: docs/PRD.md -->\n"
+        "<!-- FILE: docs/DESIGN.md -->\n<content>\n<!-- END: docs/DESIGN.md -->\n"
+        "<!-- FILE: docs/FEATURE_SPEC.md -->\n<content>\n<!-- END: docs/FEATURE_SPEC.md -->\n"
+        "PRD headings: # Problem, # Goals, # Non Goals, # User Stories, # Success Criteria. "
+        "DESIGN headings: # Architecture Changes, # Data Model, # API Changes, # UI Changes, # Risks. "
+        "FEATURE_SPEC: detailed technical spec. Generate all three now without further questions."
     )
 
 
@@ -2853,6 +3014,47 @@ def _run_planning_in_background(agent_key: str, prompt: str, config: dict[str, A
         doc.exists() and doc.stat().st_size > 0
         for doc in [PRD_FILE, DESIGN_FILE, FEATURE_SPEC_FILE]
     )
+
+
+def _run_agent_interactive(agent_key: str, prompt: str, config: dict[str, Any], *, header: str) -> None:
+    """Suspend the TUI and launch the agent in the foreground, piping the prompt."""
+    agent_cfg = (config.get("agents", {}) or {}).get(agent_key, {})
+    cmd = _resolve_agent_command(agent_key, config)
+    prompt_mode = agent_cfg.get("prompt_mode", "stdin")
+
+    info(f"Suspending TUI  launching {_agent_display_name(agent_key, config)} interactively ...")
+    if _RENDERER is not None:
+        _RENDERER.suspend()
+    try:
+        # Clear alt buffer for a clean session.
+        sys.stdout.write("\033[#25h\033[0m\033[2J\033[H")
+        sys.stdout.flush()
+        print(f"\033[1;96m   {header} \033[0m")
+        print("  The prompt has been sent. Let the agent finish, then exit to return to AIN.\n")
+        if prompt_mode == "arg":
+            proc = subprocess.Popen(cmd + [prompt], cwd=str(REPO_ROOT))
+        else:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(REPO_ROOT),
+                stdin=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            try:
+                proc.stdin.write(prompt)
+                proc.stdin.close()
+            except Exception:
+                pass
+            proc.wait()
+    finally:
+        # Restore alt buffer and resume TUI.
+        sys.stdout.write("\033[#1049l\033[#25h\033[0m\r\n")
+        sys.stdout.flush()
+        time.sleep(0.5)
+        if _RENDERER is not None:
+            _RENDERER.resume()
 
 
 def _run_planning_fallback_claude(prompt: str) -> None:
@@ -3045,7 +3247,12 @@ def run_planning_generation(state: dict, config: dict) -> None:
         ] if f.exists()
     ]
     prompt = build_prompt(prompt_file, *ctx_files)
-    planning_prompt = f"{prompt}\n\n---\n\n{_planning_direct_write_prompt()}"
+    planning_prompt = (
+        "IMPORTANT: Do NOT call any tools or attempt filesystem writes. Output all results to stdout only.\n\n"
+        + prompt
+        + "\n\n---\n\n"
+        + _planning_direct_write_prompt()
+    )
     _clear_plan_docs()
 
     agent_cfg = config.get("agents", {}).get(agent_key, {})
@@ -3069,10 +3276,21 @@ def run_planning_generation(state: dict, config: dict) -> None:
                 for doc in [PRD_FILE, DESIGN_FILE, FEATURE_SPEC_FILE]
             )
         if not planning_ok:
-            warn("Primary planning agent did not write all planning docs. Falling back to claude --print ...")
+            warn("Primary planning agent did not write all planning docs.")
 
     if not planning_ok:
-        _run_planning_fallback_claude(prompt)
+        if mode == "gemini_only":
+            info("Gemini-only mode: opening interactive Gemini planning session ...")
+            _run_agent_interactive(agent_key, planning_prompt, config, header="Gemini Planning Session")
+            planning_ok = all(
+                doc.exists() and doc.stat().st_size > 0
+                for doc in [PRD_FILE, DESIGN_FILE, FEATURE_SPEC_FILE]
+            )
+            if not planning_ok:
+                raise RuntimeError("Gemini-only mode: planning agent failed to produce planning docs.")
+        else:
+            warn("Falling back to claude --print for planning docs ...")
+            _run_planning_fallback_claude(prompt)
 
     #  Write stubs for any still-missing files 
     for doc, headings, name in [
@@ -3261,6 +3479,8 @@ def run_task_creation(state: dict, config: dict) -> None:
         TASKS_FILE.write_text(output, encoding="utf-8")
 
     if not validate_tasks_file(TASKS_FILE):
+        if mode == "gemini_only":
+            raise RuntimeError("Gemini-only mode: task creation agent did not produce a valid TASKS.md.")
         warn("Primary task creation agent did not produce a valid TASKS.md. Falling back to Codex Max ...")
         fallback = (
             _call_agent_live("task_creation_codex", prompt, config, log_slug="task_creation_fallback")
@@ -3331,6 +3551,7 @@ def _parse_and_write_task_artifacts(output: str) -> None:
 
 def run_waiting_approval(state: dict, config: dict) -> None:
     banner("Stage: Waiting for Approval")
+    _migrate_task_feedback_file()
 
     if PLANNING_APPROVED_FLAG.exists():
         success("Planning approved. Advancing to implementation.")
@@ -3374,8 +3595,12 @@ def run_waiting_approval(state: dict, config: dict) -> None:
             _emit(ApprovalReceived(run_id=_RUN_ID, actor="user", at=approved_at))
             success("Tasks approved. Advancing to implementation.")
             set_stage("implementation", state)
-            if TASK_REVIEW_FEEDBACK_FILE.exists():
-                TASK_REVIEW_FEEDBACK_FILE.unlink()
+            for f in [TASK_REVIEW_FEEDBACK_FILE, _LEGACY_TASK_REVIEW_FEEDBACK_FILE]:
+                try:
+                    if f.exists():
+                        f.unlink()
+                except Exception:
+                    pass
             return
 
         state = _rerun_planning_and_task_creation(state, config, feedback)
@@ -3459,6 +3684,7 @@ def _clean_dirs() -> list[Path]:
     return [
         SCAN_DIR,
         LOGS_DIR,
+        STATE_LOGS_DIR,
         APPROVALS_DIR,
         PIPELINE_DIR / "state",
     ]
@@ -3643,6 +3869,8 @@ def _call_agent_with_fallback(
         if _EMITTER is not None:
             raise
         warn(f"Agent {agent_name} failed: {exc}")
+        if get_selected_mode(state, config) == "gemini_only":
+            raise RuntimeError(f"Implementation agent failed in gemini-only mode: {exc}")
         info("Auto-switching to codex fallback ...")
         rolled = rollback_implementation_files()
         if rolled:
@@ -3657,6 +3885,8 @@ def _call_agent_with_fallback(
         _log(f"AGENT STDERR: {stderr[:500]}")
 
         # Exit code 1 (token exhaustion or any error)  auto-trigger codex fallback
+        if get_selected_mode(state, config) == "gemini_only":
+            raise RuntimeError("Implementation agent failed and codex fallback is disabled in gemini-only mode.")
         info("Auto-switching to codex fallback ...")
         rolled = rollback_implementation_files()
         if rolled:
@@ -4267,6 +4497,7 @@ STAGE_RUNNERS = {
     "architecture":        run_architecture,
     "user_context":        run_user_context,
     "planning_questions":  run_planning_questions,
+    "planning_answers":    run_planning_answers,
     "planning_generation": run_planning_generation,
     "task_creation":       run_task_creation,
     "waiting_approval":    run_waiting_approval,

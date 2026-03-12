@@ -180,6 +180,8 @@ class ApprovalView:
                 )
 
         footer = Text()
+        # Start one line below the table and indent to align with the task numbers.
+        footer.append("\n    ", style=_C_SECONDARY_TEXT)
         footer.append("UP/DOWN select  ", style=_C_SECONDARY_TEXT)
         footer.append("LEFT/RIGHT toggle  ", style=_C_SECONDARY_TEXT)
         footer.append("Enter submit", style=_C_NEON_PINK)

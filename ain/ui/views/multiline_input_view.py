@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Iterable
+import re
 
 from rich.align import Align
 from rich.console import Group
@@ -59,8 +60,8 @@ class MultilineInputView:
         self.source_stage = source_stage
         self._body_height = self._clamp_body_height(body_height)
         self._lines = self._coerce_lines(initial_text or "")
-        self._cursor_row = len(self._lines) - 1
-        self._cursor_col = len(self._lines[-1])
+        self._cursor_row = self._first_editable_row()
+        self._cursor_col = self._initial_cursor_col(self._cursor_row)
         self._scroll_top = 0
         self.validation_error: str | None = None
         self._ensure_cursor_visible()
@@ -120,7 +121,7 @@ class MultilineInputView:
         self.validation_error = None
 
         if self._is_newline(norm):
-            self._insert_newline()
+            self._enter_or_next()
         elif norm in ("backspace", "\x7f", "\x08"):
             self._backspace()
         elif norm in ("delete", "del"):
@@ -134,7 +135,7 @@ class MultilineInputView:
         elif norm == "down":
             self._move_down()
         elif norm == "home":
-            self._cursor_col = 0
+            self._cursor_col = max(self._prefix_len(self._cursor_row), 0)
         elif norm == "end":
             self._cursor_col = len(self._lines[self._cursor_row])
         elif norm == "tab":
@@ -174,6 +175,17 @@ class MultilineInputView:
             lines = [""]
         return lines
 
+    def _first_editable_row(self) -> int:
+        for idx, line in enumerate(self._lines):
+            if self._is_editable_row(idx):
+                return idx
+        return 0
+
+    def _initial_cursor_col(self, row: int) -> int:
+        if not self._lines:
+            return 0
+        return max(self._prefix_len(row), 0)
+
     @staticmethod
     def _normalize_key(key: str) -> str:
         if key in ("\r", "\n"):
@@ -203,12 +215,52 @@ class MultilineInputView:
             return True
         return key in combo_labels
 
+    def _prefix_len(self, row_idx: int) -> int:
+        if self.mode == MultilineInputMode.PLANNING_ANSWERS:
+            line = self._lines[row_idx]
+            if line.lstrip().startswith("A:"):
+                # Lock the label "A:" itself, allow editing immediately after the space.
+                return line.index("A:") + 3 if "A:" in line else 0
+            m = re.match(r"\s*\d+\.\s", line)
+            if m:
+                # questions are read-only
+                return len(line)
+        return 0
+
+    def _is_editable_row(self, row_idx: int) -> bool:
+        pref = self._prefix_len(row_idx)
+        if self.mode == MultilineInputMode.PLANNING_ANSWERS:
+            line = self._lines[row_idx]
+            if line.lstrip().startswith("A:"):
+                return True
+            # question rows are not editable
+            return False
+        return True
+
     def _insert_text(self, text: str) -> None:
         line = self._lines[self._cursor_row]
+        prefix = self._prefix_len(self._cursor_row)
+        if self.mode == MultilineInputMode.PLANNING_ANSWERS and not line.lstrip().startswith("A:"):
+            return  # non-editable row
+        if self._cursor_col < prefix:
+            self._cursor_col = prefix
         before = line[: self._cursor_col]
         after = line[self._cursor_col :]
         self._lines[self._cursor_row] = before + text + after
         self._cursor_col += len(text)
+
+    def _enter_or_next(self) -> None:
+        if self.mode == MultilineInputMode.PLANNING_ANSWERS:
+            # Jump to the next editable answer row.
+            nxt = self._cursor_row + 1
+            while nxt < len(self._lines) and not self._lines[nxt].lstrip().startswith("A:"):
+                nxt += 1
+            if nxt < len(self._lines):
+                self._cursor_row = nxt
+                self._cursor_col = max(self._prefix_len(nxt), 0)
+                self._ensure_cursor_visible()
+            return
+        self._insert_newline()
 
     def _insert_newline(self) -> None:
         line = self._lines[self._cursor_row]
@@ -220,12 +272,15 @@ class MultilineInputView:
         self._cursor_col = 0
 
     def _backspace(self) -> None:
-        if self._cursor_col > 0:
+        prefix = self._prefix_len(self._cursor_row)
+        if self._cursor_col > prefix:
             line = self._lines[self._cursor_row]
             self._lines[self._cursor_row] = line[: self._cursor_col - 1] + line[self._cursor_col :]
             self._cursor_col -= 1
             return
         if self._cursor_row == 0:
+            return
+        if self.mode == MultilineInputMode.PLANNING_ANSWERS:
             return
         prev_line = self._lines[self._cursor_row - 1]
         current_line = self._lines[self._cursor_row]
@@ -235,22 +290,32 @@ class MultilineInputView:
         self._cursor_row -= 1
 
     def _delete(self) -> None:
+        prefix = self._prefix_len(self._cursor_row)
         line = self._lines[self._cursor_row]
         if self._cursor_col < len(line):
+            if self._cursor_col < prefix:
+                return
             self._lines[self._cursor_row] = line[: self._cursor_col] + line[self._cursor_col + 1 :]
             return
         if self._cursor_row >= len(self._lines) - 1:
+            return
+        if self.mode == MultilineInputMode.PLANNING_ANSWERS:
             return
         self._lines[self._cursor_row] = line + self._lines[self._cursor_row + 1]
         del self._lines[self._cursor_row + 1]
 
     def _move_left(self) -> None:
-        if self._cursor_col > 0:
+        min_col = self._prefix_len(self._cursor_row)
+        if self._cursor_col > min_col:
             self._cursor_col -= 1
             return
         if self._cursor_row > 0:
-            self._cursor_row -= 1
-            self._cursor_col = len(self._lines[self._cursor_row])
+            prev = self._cursor_row - 1
+            while prev >= 0 and not self._is_editable_row(prev):
+                prev -= 1
+            if prev >= 0:
+                self._cursor_row = prev
+                self._cursor_col = max(self._prefix_len(prev), len(self._lines[prev]))
 
     def _move_right(self) -> None:
         line = self._lines[self._cursor_row]
@@ -258,22 +323,43 @@ class MultilineInputView:
             self._cursor_col += 1
             return
         if self._cursor_row < len(self._lines) - 1:
-            self._cursor_row += 1
-            self._cursor_col = 0
+            nxt = self._cursor_row + 1
+            while nxt < len(self._lines) and not self._is_editable_row(nxt):
+                nxt += 1
+            if nxt < len(self._lines):
+                self._cursor_row = nxt
+                self._cursor_col = max(self._prefix_len(nxt), 0)
 
     def _move_up(self) -> None:
         if self._cursor_row == 0:
             return
-        self._cursor_row -= 1
-        self._cursor_col = min(self._cursor_col, len(self._lines[self._cursor_row]))
+        prev = self._cursor_row - 1
+        while prev >= 0 and not self._is_editable_row(prev):
+            prev -= 1
+        if prev >= 0:
+            self._cursor_row = prev
+            self._cursor_col = max(self._prefix_len(prev), min(self._cursor_col, len(self._lines[prev])))
 
     def _move_down(self) -> None:
         if self._cursor_row >= len(self._lines) - 1:
             return
-        self._cursor_row += 1
-        self._cursor_col = min(self._cursor_col, len(self._lines[self._cursor_row]))
+        nxt = self._cursor_row + 1
+        while nxt < len(self._lines) and not self._is_editable_row(nxt):
+            nxt += 1
+        if nxt < len(self._lines):
+            self._cursor_row = nxt
+            self._cursor_col = max(self._prefix_len(nxt), min(self._cursor_col, len(self._lines[nxt])))
 
     def _ensure_cursor_visible(self) -> None:
+        if self.mode == MultilineInputMode.PLANNING_ANSWERS:
+            # Keep the question line visible by biasing one row above the cursor.
+            target_top = max(0, self._cursor_row - 1)
+            if target_top < self._scroll_top:
+                self._scroll_top = target_top
+            elif self._cursor_row >= self._scroll_top + self._body_height:
+                self._scroll_top = self._cursor_row - self._body_height + 1
+            return
+
         if self._cursor_row < self._scroll_top:
             self._scroll_top = self._cursor_row
         elif self._cursor_row >= self._scroll_top + self._body_height:
@@ -281,7 +367,7 @@ class MultilineInputView:
 
     def _clamp_body_height(self, rows: int) -> int:
         height = max(3, rows)
-        if self.mode == MultilineInputMode.FEATURE_DESCRIPTION:
+        if self.mode in (MultilineInputMode.FEATURE_DESCRIPTION, MultilineInputMode.PLANNING_ANSWERS):
             return min(height, _FEATURE_DESCRIPTION_MAX_BODY_ROWS)
         return height
 
@@ -289,7 +375,11 @@ class MultilineInputView:
 
     def _panel_title(self) -> str:
         mode_label = (
-            "Feature / Bug" if self.mode == MultilineInputMode.FEATURE_DESCRIPTION else "Task denial"
+            "Feature / Bug"
+            if self.mode == MultilineInputMode.FEATURE_DESCRIPTION
+            else "Brainstorm Answers"
+            if self.mode == MultilineInputMode.PLANNING_ANSWERS
+            else "Task denial"
         )
         return f"[bold #ff2d6f]{mode_label}[/bold #ff2d6f]"
 
@@ -323,15 +413,27 @@ class MultilineInputView:
     def _render_line(self, row_idx: int) -> Text:
         line = self._lines[row_idx]
         text = Text()
-        text.append(f"{row_idx + 1:>4} ", style=_C_SECONDARY_TEXT)
         cursor_here = row_idx == self._cursor_row
-        if cursor_here:
-            col = min(self._cursor_col, len(line))
-            text.append(line[:col], style=_C_PRIMARY_TEXT)
-            text.append("█", style=_C_NEON_PINK)
-            text.append(line[col:], style=_C_PRIMARY_TEXT)
+        if self.mode == MultilineInputMode.PLANNING_ANSWERS:
+            pref_len = self._prefix_len(row_idx)
+            prefix = line[:pref_len]
+            rest = line[pref_len:]
+            text.append(prefix, style=_C_SECONDARY_TEXT)
+            if cursor_here:
+                col = min(max(self._cursor_col - pref_len, 0), len(rest))
+                text.append(rest[:col], style=_C_PRIMARY_TEXT)
+                text.append("█", style=_C_NEON_PINK)
+                text.append(rest[col:], style=_C_PRIMARY_TEXT)
+            else:
+                text.append(rest, style=_C_PRIMARY_TEXT)
         else:
-            text.append(line, style=_C_PRIMARY_TEXT)
+            if cursor_here:
+                col = min(self._cursor_col, len(line))
+                text.append(line[:col], style=_C_PRIMARY_TEXT)
+                text.append("█", style=_C_NEON_PINK)
+                text.append(line[col:], style=_C_PRIMARY_TEXT)
+            else:
+                text.append(line, style=_C_PRIMARY_TEXT)
         return text
 
     def _render_footer(self) -> Panel:

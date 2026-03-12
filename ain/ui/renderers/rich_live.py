@@ -1431,7 +1431,7 @@ class RichLiveRenderer:
         """Estimate body rows available for the multiline overlay."""
         total = self._console.size.height
         reserved = 3 + 4 + 7  # status + keybar + header/prompt/footer padding (+1 safety)
-        return max(5, total - reserved)
+        return min(12, max(5, total - reserved))
 
 
 def _short_ts(ts: str) -> str:
