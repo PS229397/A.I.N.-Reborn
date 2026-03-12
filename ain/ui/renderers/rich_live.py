@@ -103,7 +103,7 @@ _RUN_STATUS_COLOR: dict[str, str] = {
 }
 
 # Spinner frames cycled when run_status == "running" (4 fps via _tick_loop).
-_SPIN_FRAMES = ("⠏", "⠇", "⠧", "⠦", "⠴", "⠼", "⠸", "⠹", "⠙", "⠋")
+_SPIN_FRAMES = ("⠇", "⠏", "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧")
 
 # Bottom keybar entries: (key label, action description)
 _KEYBAR_ENTRIES: list[tuple[str, str]] = [
