@@ -104,7 +104,8 @@ _RUN_STATUS_COLOR: dict[str, str] = {
 
 # Spinner frames cycled when run_status == "running" (configurable via _tick_loop).
 # _SPIN_FRAMES = ("⠇", "⠏", "⠋", "⠉", "⠙", "⠹", "⠸", "⠼", "⠴", "⠤", "⠦", "⠧")
-_SPIN_FRAMES = ( "▰▱▱▱▱▱▱",
+_SPIN_FRAMES = ( "▱▱▱▱▱▱▱",
+                 "▰▱▱▱▱▱▱",
                  "▰▰▱▱▱▱▱",
                  "▰▰▰▱▱▱▱",
                  "▰▰▰▰▱▱▱",
