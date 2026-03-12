@@ -68,17 +68,14 @@ from ain.runtime.events import (
     SubmitMultilineInputEvent,
 )
 from ain.services import config_service, log_service, state_service
+from ain.pipeline._text import _ANSI_ESC, _strip_ansi, _strip_fences, _truncate_for_prompt
+from ain.pipeline._scanning import _build_tree, detect_stack, _extract_key_file_content, generate_repo_summary
+from ain.pipeline._prompts import read_context_files, build_prompt, validate_headings, validate_tasks_file, validate_task_graph
+from ain.pipeline._failure import _TOKEN_LIMIT_PHRASES, is_token_limit_error, classify_agent_failure
 
-# 
+#
 # Helpers
-# 
-
-# Strips ANSI/VT escape sequences from agent output so they don't corrupt
-# Rich's Live display when embedded in Text objects.
-_ANSI_ESC = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*\x07)")
-
-def _strip_ansi(s: str) -> str:
-    return _ANSI_ESC.sub("", s)
+#
 
 
 # Ensure legacy context files are migrated to docs/ so TUI and agents share one location.
@@ -801,14 +798,6 @@ def checkpoint_after_stage_success(
     save_state(state)
     return state
 
-
-def classify_agent_failure(message: str) -> str:
-    text = (message or "").lower()
-    if any(phrase in text for phrase in _TOKEN_LIMIT_PHRASES):
-        return "token_exhaustion"
-    if "timed out" in text or "no response" in text:
-        return "no_response"
-    return "unknown"
 
 
 def pause_pipeline(reason: str, details: str, resume_hint: str) -> dict[str, Any]:
@@ -1612,77 +1601,9 @@ def _run_agent_background(
     return proc.returncode, captured
 
 
-def read_context_files(*files: Path) -> str:
-    parts = []
-    for f in files:
-        if f.exists():
-            content = f.read_text(encoding="utf-8")
-            parts.append(f"<!-- FILE: {f.name} -->\n{content}\n<!-- END: {f.name} -->")
-        else:
-            parts.append(f"<!-- FILE: {f.name}  NOT FOUND -->")
-    return "\n\n".join(parts)
-
-
-def build_prompt(prompt_file: Path, *context_files: Path) -> str:
-    if not prompt_file.exists():
-        raise RuntimeError(f"Prompt file not found: {prompt_file}")
-    prompt = prompt_file.read_text(encoding="utf-8")
-    if context_files:
-        ctx = read_context_files(*context_files)
-        prompt = f"{prompt}\n\n---\n## Context\n\n{ctx}"
-    return prompt
-
-# 
-# Validators
-# 
-
-def validate_headings(file: Path, required: list[str]) -> list[str]:
-    if not file.exists():
-        return required[:]
-    content = file.read_text(encoding="utf-8")
-    return [h for h in required if not re.search(r"^" + re.escape(h) + r"(\s|$)", content, re.MULTILINE)]
-
-
-def validate_tasks_file(tasks_file: Path) -> bool:
-    if not tasks_file.exists():
-        return False
-    return bool(re.search(r"- \[[ x]\]", tasks_file.read_text(encoding="utf-8")))
-
-
-def validate_task_graph(graph_file: Path) -> bool:
-    if not graph_file.exists():
-        return False
-    try:
-        content = _strip_fences(graph_file.read_text(encoding="utf-8"))
-        data = json.loads(content)
-        # If valid JSON with tasks, also rewrite without fences
-        if isinstance(data.get("tasks"), list) and len(data["tasks"]) > 0:
-            graph_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            return True
-        return False
-    except (json.JSONDecodeError, KeyError):
-        return False
-
-# 
+#
 # Stage 1: Repository Scan
-# 
-
-def _build_tree(root: Path, ignore: set[str], prefix: str = "", depth: int = 0, max_depth: int = 6) -> list[str]:
-    if depth > max_depth:
-        return ["..."]
-    lines = []
-    try:
-        entries = sorted(root.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
-    except PermissionError:
-        return []
-    visible = [e for e in entries if e.name not in ignore]
-    for i, entry in enumerate(visible):
-        connector = "└ " if i == len(visible) - 1 else "├ "
-        lines.append(f"{prefix}{connector}{entry.name}")
-        if entry.is_dir():
-            ext = "    " if i == len(visible) - 1 else "│   "
-            lines.extend(_build_tree(entry, ignore, prefix + ext, depth + 1, max_depth))
-    return lines
+#
 
 
 def scan_repo_tree(config: dict) -> str:
@@ -1698,110 +1619,7 @@ def scan_git_files() -> list[str]:
         return []
 
 
-def detect_stack(tracked_files: list[str]) -> dict[str, Any]:
-    files_set = set(tracked_files)
-    stack: dict[str, Any] = {
-        "languages": [], "frameworks": [], "package_managers": [], "devops": [],
-    }
-    ext_counts: dict[str, int] = {}
-    for f in tracked_files:
-        ext = Path(f).suffix.lower()
-        if ext:
-            ext_counts[ext] = ext_counts.get(ext, 0) + 1
 
-    lang_map = {
-        ".py": "Python", ".ts": "TypeScript", ".tsx": "TypeScript",
-        ".js": "JavaScript", ".jsx": "JavaScript", ".php": "PHP",
-        ".rb": "Ruby", ".go": "Go", ".rs": "Rust", ".java": "Java", ".cs": "C#",
-    }
-    seen: set[str] = set()
-    for ext, lang in lang_map.items():
-        if ext in ext_counts and lang not in seen:
-            stack["languages"].append(lang)
-            seen.add(lang)
-
-    pm_map = {
-        "package.json": "npm/yarn/bun", "composer.json": "Composer",
-        "requirements.txt": "pip", "pyproject.toml": "poetry/uv",
-        "Gemfile": "Bundler", "go.mod": "Go modules", "Cargo.toml": "Cargo",
-    }
-    for fname, pm in pm_map.items():
-        if fname in files_set:
-            stack["package_managers"].append(pm)
-
-    if "artisan" in files_set or any("app/Http" in f for f in tracked_files):
-        stack["frameworks"].append("Laravel")
-    if any("next.config" in f for f in tracked_files):
-        stack["frameworks"].append("Next.js")
-    if any("nuxt.config" in f for f in tracked_files):
-        stack["frameworks"].append("Nuxt.js")
-    if any("manage.py" in f for f in tracked_files):
-        stack["frameworks"].append("Django")
-    if "Dockerfile" in files_set:
-        stack["devops"].append("Docker")
-    if any("docker-compose" in f for f in tracked_files):
-        stack["devops"].append("Docker Compose")
-    if any(".github/workflows" in f for f in tracked_files):
-        stack["devops"].append("GitHub Actions")
-
-    migrations = [f for f in tracked_files if "migration" in f.lower()]
-    if migrations:
-        stack["migrations"] = migrations[:10]
-
-    return stack
-
-
-def _extract_key_file_content(config: dict) -> dict[str, str]:
-    result = {}
-    for fname in config["scan"]["key_files"]:
-        path = REPO_ROOT / fname
-        if path.exists():
-            content = path.read_text(encoding="utf-8")
-            if len(content) > 3000:
-                content = content[:3000] + "\n... [truncated]"
-            result[fname] = content
-    return result
-
-
-def generate_repo_summary(tree: str, tracked_files: list[str], config: dict) -> str:
-    stack     = detect_stack(tracked_files)
-    key_files = _extract_key_file_content(config)
-
-    lines = [
-        "# Repository Summary",
-        f"\nGenerated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
-        "\n## Technology Stack",
-    ]
-    for cat, items in stack.items():
-        if items and cat != "migrations":
-            lines.append(f"\n**{cat.title()}:** {', '.join(str(i) for i in items)}")
-    if "migrations" in stack:
-        lines.append(f"\n**Migrations:** {len(stack['migrations'])} files detected")
-
-    lines.append(f"\n## File Count\n\nTracked files: {len(tracked_files)}")
-    lines.append("\n## Key Configuration Files\n")
-    for fname, content in key_files.items():
-        lines.append(f"### {fname}\n```\n{content}\n```\n")
-    if not key_files:
-        lines.append("No standard configuration files detected.")
-
-    lines.append("\n## Entry Points\n")
-    entries = [f for f in tracked_files
-               if any(n in Path(f).name.lower() for n in
-                      ["main.", "index.", "app.", "server.", "manage.py", "artisan"])
-               and not any(s in f for s in ["node_modules", "vendor", "test", "spec"])]
-    for ep in entries[:15]:
-        lines.append(f"- `{ep}`")
-
-    lines.append("\n## Routes / Controllers\n")
-    routes = [f for f in tracked_files
-              if any(kw in f.lower() for kw in ["route", "controller", "handler", "endpoint"])
-              and "node_modules" not in f and "vendor" not in f]
-    for rf in routes[:20]:
-        lines.append(f"- `{rf}`")
-
-    lines.append(f"\n## Repository Tree\n\n```\n{tree}\n```")
-    return "\n".join(lines)
 
 
 def run_scan(state: dict, config: dict) -> None:
@@ -1825,7 +1643,7 @@ def run_scan(state: dict, config: dict) -> None:
     success(f"{len(tracked)} files  {TRACKED_FILES_FILE.relative_to(REPO_ROOT)}")
 
     step(3, 3, "Generating repository summary ...")
-    summary = generate_repo_summary(tree, tracked, config)
+    summary = generate_repo_summary(tree, tracked, config, REPO_ROOT)
     REPO_SUMMARY_FILE.write_text(summary, encoding="utf-8")
     success(f"Summary  {REPO_SUMMARY_FILE.relative_to(REPO_ROOT)}")
 
@@ -2141,10 +1959,6 @@ _TASK_DENIAL_PROMPT_TEMPLATE = (
     "Task {task_id}: {description}"
 )
 
-
-def _truncate_for_prompt(text: str, max_len: int = 600) -> str:
-    text = text.strip()
-    return text if len(text) <= max_len else f"{text[: max_len - 3]}..."
 
 
 def _persist_task_denial_feedback(
@@ -3279,15 +3093,6 @@ def run_planning_generation(state: dict, config: dict) -> None:
     set_stage("task_creation", state)
 
 
-def _strip_fences(content: str) -> str:
-    """Strip markdown code fences from file content written by agents."""
-    lines = content.strip().splitlines()
-    if lines and lines[0].startswith(chr(96)*3):
-        lines = lines[1:]
-    if lines and lines[-1].strip() == chr(96)*3:
-        lines = lines[:-1]
-    return chr(10).join(lines).strip()
-
 
 def _safe_doc_path(filename: str) -> Path:
     """Resolve a docs-relative filename and ensure it stays within DOCS_DIR."""
@@ -3681,21 +3486,6 @@ def clean_workspace(silent: bool = False) -> None:
 # -------------------------------------------------------------
 # Token-limit fallback helpers
 # -------------------------------------------------------------
-
-_TOKEN_LIMIT_PHRASES = [
-    "context window", "token limit", "maximum context", "too long",
-    "prompt is too", "input too long", "context length", "max_tokens",
-    "context_length_exceeded", "rate limit", "overloaded",
-    "reduce the length",
-]
-
-
-def is_token_limit_error(output: str, returncode: int) -> bool:
-    """Return True if the agent output/exit looks like a context or token-limit error."""
-    if returncode == 0:
-        return False
-    combined = output.lower()
-    return any(phrase in combined for phrase in _TOKEN_LIMIT_PHRASES)
 
 
 def rollback_implementation_files() -> list[str]:
@@ -4919,6 +4709,12 @@ def _run_with_tui(
                     selected_mode = renderer.request_mode_selection(mode_options, current_mode)
                     if selected_mode != current_mode:
                         set_pipeline_mode(selected_mode, current_state, current_config)
+                        # Refresh renderer mode metadata to reflect the newly selected workflow
+                        if hasattr(renderer, "configure_mode_controls"):
+                            renderer.configure_mode_controls(
+                                get_mode_details(selected_mode, current_config),
+                                None,
+                            )
 
                 next_start_stage = start_stage
                 next_single_stage = single_stage

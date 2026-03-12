@@ -525,7 +525,7 @@ class RichLiveRenderer:
 
     def _tick_loop(self) -> None:
         while self._running:
-            time.sleep(0.5)
+            time.sleep(0.25)
             with self._lock:
                 self._spin_idx += 1
                 if self._live is not None:
