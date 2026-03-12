@@ -328,7 +328,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "scan_gemini": {
             "command": "gemini",
             "args": [],
-            "model": "gemini-2.5-flash",
+            "model": "gemini-3.1-flash-lite",
             "description": "Gemini for scanning and architecture analysis",
             "skills": [
                 "codebase analysis",
@@ -383,7 +383,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "gemini_only": {
             "command": "gemini",
             "args": [],
-            "model": "gemini-2.5-flash",
+            "model": "gemini-3.1-flash-lite",
             "description": "Gemini for every stage (free-tier safe)",
             "skills": ["end-to-end planning", "code generation", "architecture reasoning"],
         },
@@ -1654,6 +1654,44 @@ def run_scan(state: dict, config: dict) -> None:
 # Stage 2: Architecture Generation (Gemini)
 # 
 
+def _extract_gemini_markdown(raw: str) -> str:
+    """Strip Gemini CLI diagnostic noise and return only the markdown body.
+
+    Gemini CLI prints executor messages, JSON API metadata, and status lines
+    to stdout alongside the actual model response.  We find the first markdown
+    heading (``# …``) and return everything from there onward, dropping any
+    preceding noise.  Line-level filters also remove known junk patterns.
+    """
+    _NOISE_PREFIXES = (
+        "[LocalAgentExecutor]",
+        "Attempt ",
+        "Error executing tool",
+        "Loaded cached credentials",
+        "An unexpected critical error",
+    )
+    _NOISE_SUBSTRINGS = (
+        "stdin is not a terminal",
+        '"metadata"',
+        '"model":',
+        '"usageMetadata"',
+        '"candidates"',
+    )
+    lines = raw.splitlines()
+    # Find the first markdown heading to skip preamble / metadata JSON.
+    start = next(
+        (i for i, l in enumerate(lines) if l.startswith("# ")),
+        None,
+    )
+    if start is not None:
+        lines = lines[start:]
+    cleaned = [
+        l for l in lines
+        if not any(l.startswith(p) for p in _NOISE_PREFIXES)
+        and not any(s in l for s in _NOISE_SUBSTRINGS)
+    ]
+    return "\n".join(cleaned).strip()
+
+
 def run_architecture(state: dict, config: dict) -> None:
     banner("Stage: Architecture Generation")
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1688,16 +1726,11 @@ def run_architecture(state: dict, config: dict) -> None:
 
     rc, gemini_output = _call_agent_no_tty(agent_key, full_prompt, config, log_slug="architecture")
 
-    # Gemini outputs to stdout (no write_file tool available via stdin mode).
-    # Strip executor noise lines that Gemini emits when tool calls are blocked.
+    # Gemini outputs the architecture doc to stdout.
+    # Strip executor/diagnostic noise and extract the markdown starting from the
+    # first top-level heading so that API metadata JSON doesn't pollute the file.
     if not (ARCHITECTURE_FILE.exists() and ARCHITECTURE_FILE.stat().st_size > 0):
-        clean_output = "\n".join(
-            l for l in gemini_output.splitlines()
-            if not l.startswith("[LocalAgentExecutor]")
-            and not l.startswith("Attempt ")
-            and not l.startswith("Error executing tool")
-            and "stdin is not a terminal" not in l
-        ).strip()
+        clean_output = _extract_gemini_markdown(gemini_output)
         if clean_output:
             ARCHITECTURE_FILE.write_text(clean_output, encoding="utf-8")
             success(f"Written  {ARCHITECTURE_FILE.relative_to(REPO_ROOT)}")
@@ -3265,10 +3298,21 @@ def _call_agent_no_tty(
         return _run_agent_background(cmd, agent_name=display, log_slug=log_slug)
 
     if "gemini" in command_name:
-        prompt_path = LOGS_DIR / f"{log_slug}_last_prompt.txt"
-        prompt_path.write_text(prompt, encoding="utf-8")
-        cmd = _resolve_agent_command(agent_key, config) + [f"@{prompt_path}"]
-        return _run_agent_background(cmd, agent_name=display, log_slug=log_slug)
+        # Write to system temp dir so Gemini's read_file tool can access it.
+        # Files inside the project (e.g. .ai-pipeline/) are blocked by Gemini's
+        # configured ignore patterns and cause "File path is ignored" errors.
+        fd, tmp_path_str = tempfile.mkstemp(suffix=".md", prefix=f"ain_{log_slug}_")
+        try:
+            os.close(fd)
+            tmp_path = Path(tmp_path_str)
+            tmp_path.write_text(prompt, encoding="utf-8")
+            cmd = _resolve_agent_command(agent_key, config) + [f"@{tmp_path}"]
+            return _run_agent_background(cmd, agent_name=display, log_slug=log_slug)
+        finally:
+            try:
+                Path(tmp_path_str).unlink(missing_ok=True)
+            except Exception:
+                pass
 
     # Fallback: try stdin (may fail for CLIs that require TTY)
     cmd = _resolve_agent_command(agent_key, config)
