@@ -106,7 +106,7 @@ class ModeSelectView:
             marker_style = _C_NEON_PINK if is_selected else _C_SECONDARY_TEXT
             text_style = _C_NEON_PINK if is_selected else _C_PRIMARY_TEXT
             body.append(f"{marker} ", style=marker_style)
-            body.append(f"{base['label']} [{base['base_key']}]\n", style=text_style)
+            body.append(f"{base['label']}\n", style=text_style)
             if is_selected:
                 tier_idx = self._tier_idx.get(base["base_key"], 0)
                 model_line = base["tiers"][tier_idx].get("model_line")

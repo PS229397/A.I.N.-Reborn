@@ -1055,7 +1055,7 @@ class RichLiveRenderer:
             layout.split_column(*cols)
             return layout
 
-        # Default: DECK on the left, DATA FEED + AGENT OUTPUT on the right.
+        # Default: DECK on the left, DATA.FEED + AGENT OUTPUT on the right.
         base_body_height = max(
             8,
             self._console.size.height - 3 - 4 - (5 if has_input else 0),
@@ -1148,8 +1148,29 @@ class RichLiveRenderer:
         bar.append("UPTIME:", style=_C_NEON_PINK)
         bar.append(f" {elapsed}", style=_C_NEON_CYAN)
         bar.append("  ║  ", style=_C_NEON_PINK)
-        bar.append("MODE:", style=_C_NEON_PINK)
-        bar.append(f" {self._mode_details.get('key', 'default')}", style=_C_NEON_CYAN)
+        # MODE/MODEL display derived from current mode details
+        model_line = (self._mode_details.get("model_lines") or [""])[0].replace("//", "").strip()
+        # Pick a short model family label from the model_line
+        if "codex" in model_line.lower():
+            model_label = "Codex"
+        elif "claude" in model_line.lower():
+            model_label = "Claude"
+        elif "gemini" in model_line.lower():
+            model_label = "Gemini"
+        else:
+            model_label = "Model"
+
+        bar.append("MODEL:", style=_C_NEON_PINK)
+        bar.append(f" {model_label}", style=_C_NEON_CYAN)
+
+        # MODE (tier) label, hidden for Gemini-only
+        mode_key = self._mode_details.get("key", "")
+        base, tier = (mode_key.rsplit("_", 1) + [""])[:2] if "_" in mode_key else (mode_key, "")
+        mode_label = tier.capitalize() if tier else mode_key
+        if model_label != "Gemini" and mode_label:
+            bar.append("  ║  ", style=_C_NEON_PINK)
+            bar.append("MODE:", style=_C_NEON_PINK)
+            bar.append(f" {mode_label}", style=_C_NEON_CYAN)
 
         if state.run_id:
             bar.append("  ║  ", style=_C_NEON_PINK)
@@ -1254,7 +1275,7 @@ class RichLiveRenderer:
 
         return Panel(
             table,
-            title=self._panel_title("stage", "// TASKLIST"),
+            title=self._panel_title("stage", "// TASK.LIST"),
             border_style=self._panel_border_style("stage"),
             padding=(0, 1),
         )
@@ -1287,7 +1308,7 @@ class RichLiveRenderer:
                 Text("// awaiting data transmission...", style=_C_NEON_CYAN),
             )
 
-        title = self._panel_title("data", "// DATA FEED")
+        title = self._panel_title("data", "// DATA.FEED")
         if not self._state.data_autoscroll:
             offset = self._state.data_scroll_offset
             title += f" [bold #ff2d6f]⏸ +{offset}[/bold #ff2d6f]"
