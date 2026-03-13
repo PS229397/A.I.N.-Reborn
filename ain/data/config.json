@@ -3,8 +3,8 @@
     "scan_gemini": {
       "command": "gemini",
       "args": [],
-      "model": "gemini-3.1-flash-lite",
-      "description": "Gemini 3.1 Flash Lite for scanning and architecture analysis.",
+      "model": "gemini-2.5-flash-lite",
+      "description": "Gemini 2.5 Flash Lite for scanning and architecture analysis.",
       "skills": [
         "codebase analysis",
         "system architecture reasoning"
@@ -91,8 +91,8 @@
     "gemini_only": {
       "command": "gemini",
       "args": [],
-      "model": "gemini-3.1-flash-lite",
-      "description": "Gemini 3.1 Flash Lite handling scan, planning, and implementation.",
+      "model": "gemini-2.5-flash-lite",
+      "description": "Gemini 2.5 Flash Lite handling scan, planning, and implementation.",
       "skills": [
         "end-to-end planning",
         "code generation",

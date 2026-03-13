@@ -190,7 +190,11 @@ class MultilineInputView:
     def _normalize_key(key: str) -> str:
         if key in ("\r", "\n"):
             return "enter"
-        return key.lower()
+        # Only lowercase multi-char key names (e.g. "Enter", "Backspace");
+        # preserve case for single printable characters so capitals work.
+        if len(key) > 1:
+            return key.lower()
+        return key
 
     @staticmethod
     def _is_cancel(key: str) -> bool:

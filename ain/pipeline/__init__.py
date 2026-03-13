@@ -1749,9 +1749,12 @@ def run_architecture(state: dict, config: dict) -> None:
         _, codex_output = _call_agent_no_tty(fallback_key, full_prompt, config, log_slug="architecture_codex")
 
         # Codex may write the file directly or output it to stdout.
+        # Strip the Codex CLI header noise (same as _extract_gemini_markdown does
+        # for Gemini) so the file contains only the markdown document.
         if not (ARCHITECTURE_FILE.exists() and ARCHITECTURE_FILE.stat().st_size > 0):
-            if codex_output.strip():
-                ARCHITECTURE_FILE.write_text(codex_output, encoding="utf-8")
+            clean_codex = _extract_gemini_markdown(codex_output)
+            if clean_codex.strip():
+                ARCHITECTURE_FILE.write_text(clean_codex, encoding="utf-8")
             else:
                 raise RuntimeError(
                     "Both Gemini and Codex failed to produce docs/architecture.md."
@@ -2658,7 +2661,10 @@ def run_planning_questions(state: dict, config: dict) -> None:
     _migrate_context_files()
 
     feature_description = _ensure_feature_description(state, source_stage="planning_questions")
-    arch_ctx = ARCHITECTURE_FILE.read_text(encoding="utf-8") if ARCHITECTURE_FILE.exists() else ""
+    raw_arch = ARCHITECTURE_FILE.read_text(encoding="utf-8") if ARCHITECTURE_FILE.exists() else ""
+    # Strip any CLI header noise that may have leaked into architecture.md from a
+    # previous Codex/Gemini fallback run so the planning agent gets clean context.
+    arch_ctx = _extract_gemini_markdown(raw_arch) if raw_arch.strip() else ""
 
     BRAINSTORM_CONTEXT_FILE.write_text(
         f"# Brainstorm Context\n\n## Feature Request\n\n{feature_description}\n\n"
@@ -3245,7 +3251,7 @@ def _build_task_graph_from_tasks_md() -> None:
             "id": i,
             "description": m.group(2).strip(),
             "depends_on": [i - 1] if i > 1 else [],
-            "status": "completed" if m.group(1) == "x" else "pending",
+            "status": "pending",  # always pending at graph creation; implementation marks completed
             "files_affected": [],
             "completed_at": None,
         })
@@ -3298,21 +3304,12 @@ def _call_agent_no_tty(
         return _run_agent_background(cmd, agent_name=display, log_slug=log_slug)
 
     if "gemini" in command_name:
-        # Write to system temp dir so Gemini's read_file tool can access it.
-        # Files inside the project (e.g. .ai-pipeline/) are blocked by Gemini's
-        # configured ignore patterns and cause "File path is ignored" errors.
-        fd, tmp_path_str = tempfile.mkstemp(suffix=".md", prefix=f"ain_{log_slug}_")
-        try:
-            os.close(fd)
-            tmp_path = Path(tmp_path_str)
-            tmp_path.write_text(prompt, encoding="utf-8")
-            cmd = _resolve_agent_command(agent_key, config) + [f"@{tmp_path}"]
-            return _run_agent_background(cmd, agent_name=display, log_slug=log_slug)
-        finally:
-            try:
-                Path(tmp_path_str).unlink(missing_ok=True)
-            except Exception:
-                pass
+        # `-p ""` forces non-interactive (headless) mode; `-y` auto-approves tool
+        # calls. Prompt delivered via stdin to avoid Windows CLI length limits.
+        # `@file` was tried but leaves Gemini interactive without `-p`, and temp
+        # files outside the workspace trigger Gemini's path-sandbox errors.
+        cmd = _resolve_agent_command(agent_key, config) + ["-p", "", "-y"]
+        return _run_agent_background(cmd, agent_name=display, log_slug=log_slug, input_text=prompt)
 
     # Fallback: try stdin (may fail for CLIs that require TTY)
     cmd = _resolve_agent_command(agent_key, config)
@@ -3616,9 +3613,10 @@ def clean_workspace(silent: bool = False) -> None:
     """Delete all per-run generated files and reset pipeline state to idle.
 
     Preserves: config.json, prompts/, CLAUDE.md, and all source code.
-    Called automatically after a successful auto-commit, or manually via --clean.
+    Only the specific pipeline-generated files in _clean_files() are removed;
+    the docs/ directory is NOT wiped wholesale so implementation output survives.
     """
-    removed: list[str] = _clean_docs_dir()
+    removed: list[str] = []
 
     for f in _clean_files():
         if f.exists():
@@ -4147,10 +4145,8 @@ def run_validation(state: dict, config: dict) -> None:
     success("All validation checks passed.")
     set_stage("done", state)
 
-    # Clean generated artifacts after a successful auto-commit
-    if config["git"]["auto_commit"]:
-        banner("Cleaning workspace for next run")
-        clean_workspace()
+    # Workspace cleaning after auto-commit is intentionally disabled.
+    # Users can run `ain clean` manually if they want to reset generated artifacts.
 
 # 
 # Agent CLI installation
@@ -4895,7 +4891,6 @@ def _run_with_tui(
                     if hasattr(renderer, "reset_state"):
                         renderer.reset_state()
                     if choice == "n":
-                        clean_workspace(silent=True)
                         save_state(_default_state(load_config()))
                         if PLANNING_APPROVED_FLAG.exists():
                             PLANNING_APPROVED_FLAG.unlink()

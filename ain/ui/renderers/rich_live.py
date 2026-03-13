@@ -1085,12 +1085,12 @@ class RichLiveRenderer:
 
         layout = Layout()
         layout.split_column(*cols)
-        # Keep STAGE/AGENT sizes; shrink only DECK/DATA by 4 lines.
-        estimated_body_height = base_body_height
-        timing_size = max(6, (estimated_body_height * 4) // 7 - 1)
+        # Derive sub-panel sizes from body_size so stream+agent never overflows
+        # the body allocation (which already accounts for the input panel).
+        timing_size = max(6, (body_size * 4) // 7 - 1)
         timing_size = max(6, timing_size - 2)
-        agent_size = max(5, (estimated_body_height // 2) - 3)
-        agent_size += 6
+        agent_size = max(5, (body_size // 2) - 3) + 6
+        agent_size = min(agent_size, body_size - 5)  # guarantee room for stream
         pipeline_size = max(5, body_size - timing_size)
         stream_size = max(5, body_size - agent_size)
         deck = Layout(name="deck", ratio=1)
@@ -1117,11 +1117,10 @@ class RichLiveRenderer:
             self._console.size.height - 3 - 4 - (5 if has_input else 0),
         )
         body_size = max(8, base_body_height - 2)
-        estimated_body_height = base_body_height
-        timing_size = max(6, (estimated_body_height * 4) // 7 - 1)
+        timing_size = max(6, (body_size * 4) // 7 - 1)
         timing_size = max(6, timing_size - 2)
-        agent_size = max(5, (estimated_body_height // 2) - 3)
-        agent_size += 6
+        agent_size = max(5, (body_size // 2) - 3) + 6
+        agent_size = min(agent_size, body_size - 5)
         pipeline_size = max(5, body_size - timing_size)
         stream_size = max(5, body_size - agent_size)
         return {
