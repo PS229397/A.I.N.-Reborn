@@ -35,7 +35,6 @@ node_modules/
 .ai-pipeline/state_logs/
 .ai-pipeline/scan/
 docs/user_context.md
-docs/brainstorm_context.md
 .ai-pipeline/approvals/
 .ai-pipeline/state/
 
@@ -50,4 +49,5 @@ docs/TASKS.md
 docs/TASK_GRAPH.json
 docs/IMPLEMENTATION_LOG.md
 docs/VERIFICATION_REPORT.md
+docs/*_exec.md
 

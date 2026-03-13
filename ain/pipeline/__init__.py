@@ -2661,29 +2661,18 @@ def run_planning_questions(state: dict, config: dict) -> None:
     _migrate_context_files()
 
     feature_description = _ensure_feature_description(state, source_stage="planning_questions")
-    raw_arch = ARCHITECTURE_FILE.read_text(encoding="utf-8") if ARCHITECTURE_FILE.exists() else ""
-    # Strip any CLI header noise that may have leaked into architecture.md from a
-    # previous Codex/Gemini fallback run so the planning agent gets clean context.
-    arch_ctx = _extract_gemini_markdown(raw_arch) if raw_arch.strip() else ""
 
-    BRAINSTORM_CONTEXT_FILE.write_text(
-        f"# Brainstorm Context\n\n## Feature Request\n\n{feature_description}\n\n"
-        f"## Architecture Overview\n\n{arch_ctx[:4000]}\n",
-        encoding="utf-8",
-    )
-    try:
-        if _LEGACY_BRAINSTORM_CONTEXT_FILE.exists():
-            _LEGACY_BRAINSTORM_CONTEXT_FILE.unlink()
-    except Exception:
-        pass
+    # Guarantee docs/user_context.md is on disk before calling the agent.
+    # _persist_feature_description may have already written it, but we write it
+    # again here as a safety measure so the agent can always find it.
+    USER_CONTEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    USER_CONTEXT_FILE.write_text(feature_description.strip(), encoding="utf-8")
 
     prompt_file = PROMPTS_DIR / "planning_questions_prompt.md"
     if not prompt_file.exists():
         raise RuntimeError(f"Missing prompt: {prompt_file}")
-    prompt = prompt_file.read_text(encoding="utf-8").format(
-        feature_description=feature_description,
-        arch_ctx=arch_ctx[:4000],
-    )
+    # Prompt references docs/user_context.md and docs/architecture.md directly.
+    prompt = prompt_file.read_text(encoding="utf-8")
 
     live = _EMITTER is not None
     raw_output = _call_planning_questions_agent(agent_key, prompt, config, live=live).strip()
@@ -2716,10 +2705,21 @@ def run_planning_questions(state: dict, config: dict) -> None:
 def _extract_questions_section(text: str) -> str:
     """Return only the '# Open Questions' section from agent output.
 
-    Agents like codex may echo the task prompt before generating their response.
-    Searching for the heading strips any leading noise so OPEN_QUESTIONS.md
-    contains only the structured questions output.
+    Agents like codex may echo the task prompt before generating their response,
+    including a template section with '<question>' placeholders. This function
+    skips any such placeholder sections and returns the first real section that
+    contains actual '- Q:' lines.
     """
+    for m in re.finditer(r"^# Open Questions\b", text, re.MULTILINE):
+        start = m.start()
+        rest = text[start:]
+        nxt = re.search(r"^# \w", rest[1:], re.MULTILINE)
+        section = rest[: nxt.start() + 1].strip() if nxt else rest.strip()
+        if "<question>" in section or "<answer" in section:
+            continue
+        if re.search(r"^- Q:", section, re.MULTILINE):
+            return section
+    # Fallback: return whatever is after the last '# Open Questions' heading
     match = re.search(r"^(# Open Questions\b.*)", text, re.MULTILINE | re.DOTALL)
     if match:
         return match.group(1).strip()
@@ -2734,7 +2734,10 @@ def _build_answers_template() -> str:
     for line in lines:
         stripped = line.lstrip()
         if stripped.startswith("- Q:"):
-            questions.append(stripped.split("Q:", 1)[1].strip())
+            q = stripped.split("Q:", 1)[1].strip()
+            if "<question>" in q or not q:
+                continue
+            questions.append(q)
     if not questions:
         return ""
     parts: list[str] = []
@@ -3447,10 +3450,23 @@ def _parse_and_write_task_artifacts(output: str) -> None:
     if not TASK_GRAPH_FILE.exists():
         _build_task_graph_from_tasks_md()
 
+    # Normalise: agents mark tasks [x]/completed in their output, but at this
+    # point no implementation has run yet — force every task back to "pending".
+    if TASK_GRAPH_FILE.exists():
+        try:
+            graph = json.loads(TASK_GRAPH_FILE.read_text(encoding="utf-8"))
+            for t in graph.get("tasks", []):
+                t["status"] = "pending"
+                t["completed_at"] = None
+            graph["completed"] = 0
+            TASK_GRAPH_FILE.write_text(json.dumps(graph, indent=2), encoding="utf-8")
+        except Exception:
+            pass
 
-# 
+
+#
 # Stage 6: Approval Gate
-# 
+#
 
 def run_waiting_approval(state: dict, config: dict) -> None:
     banner("Stage: Waiting for Approval")
@@ -3579,7 +3595,6 @@ def _clean_files() -> list[Path]:
         DOCS_DIR / "IMPLEMENTATION_LOG.md",
         DOCS_DIR / "VERIFICATION_REPORT.md",
         USER_CONTEXT_FILE,
-        BRAINSTORM_CONTEXT_FILE,
     ]
 
 
@@ -3613,10 +3628,10 @@ def clean_workspace(silent: bool = False) -> None:
     """Delete all per-run generated files and reset pipeline state to idle.
 
     Preserves: config.json, prompts/, CLAUDE.md, and all source code.
-    Only the specific pipeline-generated files in _clean_files() are removed;
-    the docs/ directory is NOT wiped wholesale so implementation output survives.
+    Called explicitly via ``ain clean`` or the [C] quit+clean key — NOT called
+    automatically on completion or new-session so implementation output is safe.
     """
-    removed: list[str] = []
+    removed: list[str] = _clean_docs_dir()
 
     for f in _clean_files():
         if f.exists():
@@ -3716,7 +3731,26 @@ def _call_agent_with_fallback(
     (LOGS_DIR / f"{agent_name}_last_prompt.txt").write_text(prompt, encoding="utf-8")
 
     try:
-        if prompt_mode == "arg":
+        command_name = str(config.get("agents", {}).get(agent_name, {}).get("command", agent_name)).lower()
+        if "codex" in command_name:
+            # Write prompt to docs/ so codex reads it via its file tools rather
+            # than stdin (which truncates after the first paragraph in exec mode).
+            prompt_ref = DOCS_DIR / "implementation_exec.md"
+            prompt_ref.parent.mkdir(parents=True, exist_ok=True)
+            prompt_ref.write_text(prompt, encoding="utf-8")
+            rel = str(prompt_ref.relative_to(REPO_ROOT)).replace("\\", "/")
+            task = (
+                f'Read the file "{rel}" and follow ALL its instructions exactly. '
+                f'Implement every change described. Do not output explanations — just make the changes.'
+            )
+            if "exec" not in cmd[1:]:
+                cmd = [cmd[0], "exec", *cmd[1:]]
+            returncode, output = _run_agent_background(
+                cmd + [task],
+                agent_name=display,
+                log_slug="implementation",
+            )
+        elif prompt_mode == "arg":
             returncode, output = _run_agent_background(
                 cmd + [prompt],
                 agent_name=display,
