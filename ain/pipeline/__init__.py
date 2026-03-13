@@ -2613,7 +2613,11 @@ def _call_planning_questions_agent(agent_key: str, prompt: str, config: dict, *,
         cmd: list[str] = [codex_bin, "exec"]
         if model:
             cmd += ["--model", model]
-        cmd.append(prompt)
+        # codex exec truncates multi-line CLI args at the first newline on Windows.
+        # The prompt is already written to a log file above; pass a single-line
+        # task arg that tells codex to read the full prompt from that file.
+        prompt_file_path = LOGS_DIR / f"{agent_key}_last_prompt.txt"
+        cmd.append(f"Follow all instructions in this file exactly: {prompt_file_path}")
         if live:
             rc, output = _run_agent_background(cmd, agent_name=display, log_slug="planning_questions")
             if rc != 0:
@@ -2659,6 +2663,10 @@ def run_planning_questions(state: dict, config: dict) -> None:
     banner(f"Stage: Planning  Brainstorm [mode={mode} agent={agent_key}]")
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
     _migrate_context_files()
+    # Start every brainstorm round from a clean slate so stale files cannot
+    # cause the Q&A UI to open with old/empty content.
+    OPEN_QUESTIONS_FILE.unlink(missing_ok=True)
+    OPEN_ANSWERS_FILE.unlink(missing_ok=True)
 
     feature_description = _ensure_feature_description(state, source_stage="planning_questions")
 
@@ -2691,10 +2699,10 @@ def run_planning_questions(state: dict, config: dict) -> None:
     if not OPEN_QUESTIONS_FILE.exists() or OPEN_QUESTIONS_FILE.stat().st_size == 0:
         raise RuntimeError("Planning brainstorm agent did not produce docs/OPEN_QUESTIONS.md.")
 
-    # Only advance to planning_answers if there are actual questions to answer.
-    if not re.search(r"^- Q:", OPEN_QUESTIONS_FILE.read_text(encoding="utf-8"), re.MULTILINE):
+    # Only advance to planning_answers if there are actual (non-placeholder) questions to answer.
+    if not _extract_real_questions(OPEN_QUESTIONS_FILE.read_text(encoding="utf-8")):
         raise RuntimeError(
-            "Planning brainstorm output contains no questions (- Q: lines). "
+            "Planning brainstorm output contains no real questions. "
             "Check .ai-pipeline/logs/ for raw agent output and re-run."
         )
 
@@ -2717,33 +2725,84 @@ def _extract_questions_section(text: str) -> str:
         section = rest[: nxt.start() + 1].strip() if nxt else rest.strip()
         if "<question>" in section or "<answer" in section:
             continue
-        if re.search(r"^- Q:", section, re.MULTILINE):
+        if _extract_real_questions(section):
             return section
-    # Fallback: return whatever is after the last '# Open Questions' heading
+    # Fallback: return whatever is after the last '# Open Questions' heading,
+    # but only when it contains at least one real question.
     match = re.search(r"^(# Open Questions\b.*)", text, re.MULTILINE | re.DOTALL)
     if match:
-        return match.group(1).strip()
-    return text.strip()
+        fallback = match.group(1).strip()
+        if _extract_real_questions(fallback):
+            return fallback
+        return ""
+    stripped = text.strip()
+    return stripped if _extract_real_questions(stripped) else ""
+
+
+def _is_placeholder_question(question: str) -> bool:
+    q = question.strip().lower()
+    if not q:
+        return True
+    # Reject template placeholders such as:
+    # "<specific question about the feature>" or "<question>"
+    if q.startswith("<") and q.endswith(">"):
+        return True
+    if "<question" in q or "<specific question" in q:
+        return True
+    return False
+
+
+def _extract_real_questions(text: str) -> list[str]:
+    questions: list[str] = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("- Q:"):
+            q = stripped.split("Q:", 1)[1].strip()
+            if _is_placeholder_question(q):
+                continue
+            questions.append(q)
+    return questions
 
 
 def _build_answers_template() -> str:
     if not OPEN_QUESTIONS_FILE.exists():
         return ""
-    lines = OPEN_QUESTIONS_FILE.read_text(encoding="utf-8").splitlines()
-    questions: list[str] = []
-    for line in lines:
-        stripped = line.lstrip()
-        if stripped.startswith("- Q:"):
-            q = stripped.split("Q:", 1)[1].strip()
-            if "<question>" in q or not q:
-                continue
-            questions.append(q)
+    questions = _extract_real_questions(OPEN_QUESTIONS_FILE.read_text(encoding="utf-8"))
     if not questions:
         return ""
     parts: list[str] = []
     for idx, q in enumerate(questions, start=1):
         parts.append(f"{idx}. {q}\nA: \n")
     return "\n".join(parts).strip() + "\n"
+
+
+def _extract_answer_values(text: str) -> list[str]:
+    """Return answer values from a planning-answers document in order."""
+    answers: list[str] = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("A:"):
+            answers.append(stripped.split("A:", 1)[1].strip())
+    return answers
+
+
+def _merge_answers_into_template(template: str, existing: str) -> str:
+    """Hydrate template `A:` lines using existing answers by index."""
+    existing_answers = _extract_answer_values(existing)
+    if not existing_answers:
+        return template
+
+    merged: list[str] = []
+    answer_idx = 0
+    for line in template.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("A:"):
+            value = existing_answers[answer_idx] if answer_idx < len(existing_answers) else ""
+            merged.append(f"A: {value}".rstrip())
+            answer_idx += 1
+        else:
+            merged.append(line)
+    return "\n".join(merged).rstrip() + "\n"
 
 
 def run_planning_answers(state: dict, config: dict) -> None:
@@ -2756,14 +2815,14 @@ def run_planning_answers(state: dict, config: dict) -> None:
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
     existing = OPEN_ANSWERS_FILE.read_text(encoding="utf-8") if OPEN_ANSWERS_FILE.exists() else ""
     template = _build_answers_template()
-    initial_text = existing or template
 
     # Don't open the Q&A container if there are no actual questions to answer.
-    if not template and not existing:
+    if not template:
         raise RuntimeError(
             "OPEN_QUESTIONS.md contains no questions (- Q: lines). "
             "Re-run planning_questions to regenerate it."
         )
+    initial_text = _merge_answers_into_template(template, existing) if existing else template
     prompt_text = (
         "Answer each question below on the A: line. Keep answers concise.\n"
         "If something is still unclear, write 'Needs input'. "
