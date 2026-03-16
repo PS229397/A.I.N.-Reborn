@@ -2594,6 +2594,7 @@ def _call_planning_questions_agent(agent_key: str, prompt: str, config: dict, *,
     claude requires ``--print`` mode with the prompt as a CLI arg (the
     implementation tool-flags are inappropriate here and agentic mode also
     rejects non-TTY stdin).
+    gemini is forced through the non-TTY helper to prevent interactive hangs.
     All other agents fall back to the standard call_agent / _call_agent_live path.
     """
     agent_cfg = config.get("agents", {}).get(agent_key, {})
@@ -2644,6 +2645,18 @@ def _call_planning_questions_agent(agent_key: str, prompt: str, config: dict, *,
             warn(f"Agent {agent_key} exited {result.returncode}")
         return _save_and_return(result.stdout or "")
 
+    if "gemini" in command_name:
+        rc, output = _call_agent_no_tty(
+            agent_key,
+            prompt,
+            config,
+            log_slug="planning_questions",
+            display_suffix="questions",
+        )
+        if rc != 0:
+            warn(f"Agent {agent_key} exited {rc}")
+        return _save_and_return(output)
+
     # Gemini and any other agents: use the standard paths.
     if live:
         return _call_agent_live(agent_key, prompt, config, log_slug="planning_questions")
@@ -2679,8 +2692,9 @@ def run_planning_questions(state: dict, config: dict) -> None:
     prompt_file = PROMPTS_DIR / "planning_questions_prompt.md"
     if not prompt_file.exists():
         raise RuntimeError(f"Missing prompt: {prompt_file}")
-    # Prompt references docs/user_context.md and docs/architecture.md directly.
-    prompt = prompt_file.read_text(encoding="utf-8")
+    # Build a self-contained prompt with embedded context so agents (especially
+    # Gemini in headless mode) do not depend on filesystem reads.
+    prompt = build_prompt(prompt_file, USER_CONTEXT_FILE, ARCHITECTURE_FILE)
 
     live = _EMITTER is not None
     raw_output = _call_planning_questions_agent(agent_key, prompt, config, live=live).strip()
@@ -3430,11 +3444,27 @@ def run_task_creation(state: dict, config: dict) -> None:
     prompt = build_prompt(prompt_file, *ctx_files)
     live_task_output = _EMITTER is not None
 
-    call = (
-        lambda: _call_agent_live(agent_key, prompt, config, log_slug="task_creation")
-        if live_task_output
-        else call_agent(agent_key, prompt, config)
-    )
+    agent_cfg = config.get("agents", {}).get(agent_key, {})
+    command_name = str(agent_cfg.get("command", agent_key)).lower()
+
+    if "gemini" in command_name:
+        def call() -> str:
+            rc, output = _call_agent_no_tty(
+                agent_key,
+                prompt,
+                config,
+                log_slug="task_creation",
+                display_suffix="tasks",
+            )
+            if rc != 0:
+                warn(f"Agent {agent_key} exited {rc}")
+            return output
+    else:
+        call = (
+            lambda: _call_agent_live(agent_key, prompt, config, log_slug="task_creation")
+            if live_task_output
+            else call_agent(agent_key, prompt, config)
+        )
     output = call()
     if not output.strip():
         raise RuntimeError("Task creation agent returned empty output.")
@@ -3870,12 +3900,83 @@ def _build_task_prompt(task: dict, prompt_file: Path) -> str:
     """Construct the full prompt for a single task."""
     base_prompt = prompt_file.read_text(encoding="utf-8")
     context     = read_context_files(ARCHITECTURE_FILE, DESIGN_FILE, TASKS_FILE)
+    expected_outputs = _extract_explicit_task_paths(str(task.get("description", "")))
+    expected_block = ""
+    if expected_outputs:
+        lines = []
+        for path in expected_outputs:
+            lines.append(f"- `{_display_path(path)}`")
+        expected_block = (
+            "\n\n---\n## Expected Output Files\n\n"
+            + "\n".join(lines)
+            + "\n\nYou MUST create/update every file listed above before finishing this task. "
+              "Do not report completion until those files exist on disk."
+        )
     return (
         f"{base_prompt}\n\n---\n## Current Task\n\n"
         f"**Task {task['id']}:** {task['description']}\n\n"
         f"**Dependencies:** {task.get('depends_on') or 'none'}\n\n"
         f"---\n## Reference Documents\n\n{context}"
+        f"{expected_block}"
     )
+
+
+def _extract_explicit_task_paths(description: str) -> list[Path]:
+    """Return repo-absolute paths explicitly referenced in task text.
+
+    We only consider backticked path-like tokens to avoid false positives from
+    natural language, and only keep relative/repo-root paths (no URLs).
+    """
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    for match in re.finditer(r"`([^`]+)`", description):
+        token = match.group(1).strip()
+        if not token or "://" in token:
+            continue
+        # Ignore obvious shell snippets / flags.
+        if token.startswith("-") or " " in token:
+            continue
+        if "/" not in token and "\\" not in token:
+            continue
+
+        normalized = token.replace("\\", "/")
+        if normalized.startswith("./"):
+            normalized = normalized[2:]
+        if normalized.startswith("/"):
+            normalized = normalized[1:]
+        if not normalized or normalized.startswith(".."):
+            continue
+
+        # Keep file-like targets and docs-prefixed paths.
+        if "." not in Path(normalized).name and not normalized.lower().startswith("docs/"):
+            continue
+
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append((REPO_ROOT / normalized).resolve())
+
+    return candidates
+
+
+def _ensure_explicit_task_outputs_exist(description: str) -> None:
+    """Fail a task when explicitly referenced output paths were not created."""
+    expected_paths = _extract_explicit_task_paths(description)
+    if not expected_paths:
+        return
+
+    missing: list[str] = []
+    for path in expected_paths:
+        if not path.exists():
+            missing.append(_display_path(path))
+
+    if missing:
+        raise RuntimeError(
+            "Task reported complete but expected artifact(s) are missing: "
+            + ", ".join(missing)
+        )
 
 
 def _run_one_task(
@@ -3909,6 +4010,7 @@ def _run_one_task(
         _call_agent_with_fallback(agent_key, task_prompt, state, config)
 
         _emit_workspace_delta(agent_name, workspace_before)
+        _ensure_explicit_task_outputs_exist(description)
 
         duration_ms = int((datetime.now(timezone.utc) - t0).total_seconds() * 1000)
         _emit(TaskCompleted(
